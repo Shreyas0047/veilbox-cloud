@@ -6,7 +6,6 @@ SUITE="${SUITE:-trixie}"
 MIRROR="${MIRROR:-http://deb.debian.org/debian}"
 OUTPUT_DIR="${OUTPUT_DIR:-/output}"
 ROOTFS="/tmp/rootfs"
-IMAGE_SIZE="${IMAGE_SIZE:-4G}"
 IMAGE_NAME="${IMAGE_NAME:-veilbox-cloud-${SUITE}-${ARCH}}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -22,14 +21,22 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 check_deps() {
-  for cmd in debootstrap chroot qemu-img parted losetup mkfs.ext4 rsync git curl wget; do
+  for cmd in debootstrap chroot qemu-img parted losetup mkfs.ext4 rsync curl wget unzip; do
     command -v "$cmd" >/dev/null 2>&1 || die "Missing dependency: $cmd"
   done
 }
 
 install_packages() {
   info "Installing packages..."
+  local grub_pkgs
+  if [ "$ARCH" = "amd64" ]; then
+    grub_pkgs="grub-pc grub-efi-${ARCH}-bin grub-efi-${ARCH}-signed shim-signed"
+  else
+    grub_pkgs="grub-efi-${ARCH}-bin grub-efi-${ARCH}-signed shim-signed efibootmgr"
+  fi
+
   chroot "$ROOTFS" apt-get update -qq
+  # shellcheck disable=SC2086
   chroot "$ROOTFS" apt-get install -y -qq \
     linux-image-cloud-${ARCH} \
     systemd systemd-sysv dbus \
@@ -41,9 +48,9 @@ install_packages() {
     parted lvm2 \
     tmux htop iotop iftop jq \
     python3 python3-pip python3-venv \
-    grub-pc grub-efi-${ARCH}-bin shim-signed efibootmgr \
+    $grub_pkgs efibootmgr \
     cryptsetup cryptsetup-initramfs \
-    gnupg lsb-release
+    gnupg lsb-release unzip
   chroot "$ROOTFS" apt-get clean -qq
 }
 
@@ -58,76 +65,92 @@ install_docker() {
   rm -f "$ROOTFS/etc/apt/sources.list.d/docker.list"
 }
 
+install_binary() {
+  local name="$1" url="$2"
+  local dest="/usr/local/bin/$name"
+  if curl -fsSL --connect-timeout 15 --max-time 120 "$url" -o "$ROOTFS$dest" 2>/dev/null; then
+    chmod +x "$ROOTFS$dest"
+    echo "  $name installed"
+  else
+    echo "  [WARN] $name skipped"
+  fi
+}
+
+install_tarball() {
+  local name="$1" url="$2" binary="${3:-$1}"
+  local dest="/usr/local/bin/$name"
+  local tmp=$(mktemp -d)
+  if curl -fsSL --connect-timeout 15 --max-time 120 "$url" -o "$tmp/pkg" 2>/dev/null; then
+    case "$url" in
+      *.zip)
+        unzip -q "$tmp/pkg" -d "$tmp" 2>/dev/null
+        ;;
+      *)
+        tar xzf "$tmp/pkg" -C "$tmp" 2>/dev/null || true
+        ;;
+    esac
+    find "$tmp" -name "$binary" -type f ! -name "*.tar.gz" ! -name "*.zip" -exec cp {} "$ROOTFS$dest" \; 2>/dev/null
+    if [ ! -f "$ROOTFS$dest" ]; then
+      # Fallback: find the largest file in tmp
+      local best=$(find "$tmp" -maxdepth 3 -type f -executable -o -type f -name "$binary" 2>/dev/null | head -1)
+      [ -n "$best" ] && cp "$best" "$ROOTFS$dest" 2>/dev/null || true
+    fi
+    chmod +x "$ROOTFS$dest" 2>/dev/null || true
+    if [ -f "$ROOTFS$dest" ]; then
+      echo "  $name installed"
+    else
+      echo "  [WARN] $name extraction failed"
+    fi
+  else
+    echo "  [WARN] $name download failed"
+  fi
+  rm -rf "$tmp"
+}
+
 install_devops_tools() {
   info "Installing DevOps CLI tools..."
-  local BIN="/usr/local/bin"
 
-  install_binary() {
-    local name="$1" url="$2"
-    curl -fsSL --connect-timeout 15 --max-time 120 "$url" -o "$ROOTFS/$BIN/$name"
-    chmod +x "$ROOTFS/$BIN/$name"
-    echo "  $name installed"
-  }
-
-  install_tarball() {
-    local name="$1" url="$2" binary="${3:-$1}"
-    local tmp=$(mktemp -d)
-    curl -fsSL --connect-timeout 15 --max-time 120 "$url" -o "$tmp/pkg.tar.gz"
-    tar xzf "$tmp/pkg.tar.gz" -C "$tmp" 2>/dev/null
-    find "$tmp" -name "$binary" -type f -exec cp {} "$ROOTFS/$BIN/$name" \; 2>/dev/null
-    chmod +x "$ROOTFS/$BIN/$name" 2>/dev/null || true
-    rm -rf "$tmp"
-    [ -f "$ROOTFS/$BIN/$name" ] && echo "  $name installed"
-  }
-
-  # kubectl
   install_binary "kubectl" \
     "https://dl.k8s.io/release/v1.36.2/bin/linux/${ARCH}/kubectl"
 
-  # Helm
   install_tarball "helm" \
     "https://get.helm.sh/helm-v4.2.2-linux-${ARCH}.tar.gz" "helm"
 
-  # yq
   install_tarball "yq" \
     "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}.tar.gz" "yq"
 
-  # dive
   install_tarball "dive" \
     "https://github.com/wagoodman/dive/releases/latest/download/dive_0.12.0_linux_${ARCH}.tar.gz" "dive"
 
-  # k9s
   install_tarball "k9s" \
     "https://github.com/derailed/k9s/releases/latest/download/k9s_Linux_${ARCH}.tar.gz" "k9s"
 
-  # stern
   install_tarball "stern" \
     "https://github.com/stern/stern/releases/latest/download/stern_1.32.0_linux_${ARCH}.tar.gz" "stern"
 
-  # kind
   install_binary "kind" \
     "https://github.com/kubernetes-sigs/kind/releases/latest/download/kind-linux-${ARCH}"
 
-  # kustomize
   install_tarball "kustomize" \
     "https://github.com/kubernetes-sigs/kustomize/releases/latest/download/kustomize_v5.6.0_linux_${ARCH}.tar.gz" "kustomize"
 
-  # Terraform
   install_tarball "terraform" \
     "https://releases.hashicorp.com/terraform/1.11.0/terraform_1.11.0_linux_${ARCH}.zip" "terraform"
 
-  # GitHub CLI
   install_tarball "gh" \
     "https://github.com/cli/cli/releases/latest/download/gh_2.68.0_linux_${ARCH}.tar.gz" "gh"
 
   # AWS CLI v2
   local aws_tmp=$(mktemp -d)
-  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}.zip" -o "$aws_tmp/awscliv2.zip"
-  unzip -q "$aws_tmp/awscliv2.zip" -d "$aws_tmp"
-  mkdir -p "$ROOTFS/usr/local/aws-cli"
-  cp -r "$aws_tmp/aws/" "$ROOTFS/tmp/aws-install"
-  chroot "$ROOTFS" /tmp/aws-install/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli 2>/dev/null || true
-  rm -rf "$aws_tmp" "$ROOTFS/tmp/aws-install" 2>/dev/null || true
+  if curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}.zip" -o "$aws_tmp/awscliv2.zip" 2>/dev/null; then
+    unzip -q "$aws_tmp/awscliv2.zip" -d "$aws_tmp"
+    cp -r "$aws_tmp/aws/" "$ROOTFS/tmp/aws-install"
+    chroot "$ROOTFS" /tmp/aws-install/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli 2>/dev/null || true
+    rm -rf "$ROOTFS/tmp/aws-install" 2>/dev/null || true
+  else
+    echo "  [WARN] aws download failed"
+  fi
+  rm -rf "$aws_tmp" 2>/dev/null || true
 }
 
 configure_system() {
@@ -261,11 +284,16 @@ create_disk_image() {
   # Copy rootfs
   rsync -a "$ROOTFS/" "$mnt/"
 
-  # Install GRUB for both BIOS and EFI
-  grub-install --target=i386-pc --boot-directory="$mnt/boot" "$loop"
+  # Install GRUB based on architecture
   mkdir -p "$mnt/boot/efi"
-  grub-install --target=x86_64-efi --efi-directory="$mnt/boot/efi" \
-    --boot-directory="$mnt/boot" --removable
+  if [ "$ARCH" = "amd64" ]; then
+    grub-install --target=i386-pc --boot-directory="$mnt/boot" "$loop"
+    grub-install --target=x86_64-efi --efi-directory="$mnt/boot/efi" \
+      --boot-directory="$mnt/boot" --removable
+  else
+    grub-install --target=arm64-efi --efi-directory="$mnt/boot/efi" \
+      --boot-directory="$mnt/boot" --removable
+  fi
 
   # Generate GRUB config
   mkdir -p "$mnt/boot/grub"
