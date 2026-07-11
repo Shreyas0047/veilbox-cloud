@@ -354,9 +354,13 @@ configure_system
 # Remove policy-rc.d
 rm -f "$ROOTFS/usr/sbin/policy-rc.d"
 
-# Unmount
-cleanup
+# Unmount virtual filesystems (but keep rootfs for disk image)
+for d in dev proc sys; do
+  mountpoint -q "$ROOTFS/$d" 2>/dev/null && umount -l "$ROOTFS/$d" 2>/dev/null || true
+done
 
 create_disk_image
+
+cleanup
 
 info "Build complete!"
