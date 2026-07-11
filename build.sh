@@ -271,38 +271,43 @@ create_disk_image() {
   # Create raw disk
   dd if=/dev/zero of="$raw" bs=1M count=0 seek=$((4 * 1024)) status=progress
 
-  # Partition first, then setup loop device
-  local root_part
+  # Partition: [BIOS boot (amd64)] + EFI (FAT32, esp) + root (ext4)
+  local efi_part root_part
   if [ "$ARCH" = "amd64" ]; then
     parted -s "$raw" mklabel gpt
     parted -s "$raw" mkpart primary 1MB 2MB
     parted -s "$raw" set 1 bios_grub on
-    parted -s "$raw" mkpart primary ext4 2MB 100%
-    parted -s "$raw" set 2 boot on
-    root_part="p2"
+    parted -s "$raw" mkpart primary fat32 2MB 102MB
+    parted -s "$raw" set 2 esp on
+    parted -s "$raw" mkpart primary ext4 102MB 100%
+    parted -s "$raw" set 3 boot on
+    efi_part="p2"; root_part="p3"
   else
     parted -s "$raw" mklabel gpt
-    parted -s "$raw" mkpart primary ext4 1MB 100%
-    parted -s "$raw" set 1 boot on
-    root_part="p1"
+    parted -s "$raw" mkpart primary fat32 1MB 101MB
+    parted -s "$raw" set 1 esp on
+    parted -s "$raw" mkpart primary ext4 101MB 100%
+    parted -s "$raw" set 2 boot on
+    efi_part="p1"; root_part="p2"
   fi
 
   local loop=$(losetup --show -fP "$raw" 2>/dev/null || true)
   loop=$(basename "$loop" 2>/dev/null || echo "loop0")
-  # Wait for partition devices
   for i in 1 2 3; do
     [ -e "/dev/${loop}${root_part}" ] && break
     sleep 1
   done
 
+  mkfs.fat -F32 "/dev/${loop}${efi_part}"
   mkfs.ext4 -L cloud-root "/dev/${loop}${root_part}"
   mount "/dev/${loop}${root_part}" "$mnt"
+  mkdir -p "$mnt/boot/efi"
+  mount "/dev/${loop}${efi_part}" "$mnt/boot/efi"
 
   # Copy rootfs
   rsync -a "$ROOTFS/" "$mnt/"
 
-  # Install GRUB based on architecture
-  mkdir -p "$mnt/boot/efi"
+  # Install GRUB
   if [ "$ARCH" = "amd64" ]; then
     grub-install --target=i386-pc --boot-directory="$mnt/boot" "/dev/$loop"
     grub-install --target=x86_64-efi --efi-directory="$mnt/boot/efi" \
@@ -311,6 +316,8 @@ create_disk_image() {
     grub-install --target=arm64-efi --efi-directory="$mnt/boot/efi" \
       --boot-directory="$mnt/boot" --removable
   fi
+
+  umount "$mnt/boot/efi"
 
   # Generate GRUB config
   mkdir -p "$mnt/boot/grub"
