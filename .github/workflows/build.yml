@@ -1,0 +1,109 @@
+name: Build Cloud Image
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-amd64:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq debootstrap qemu-utils parted rsync \
+            grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed
+
+      - name: Build image
+        run: |
+          sudo bash build.sh
+          mkdir -p output
+          mv /output/*.qcow2 output/ 2>/dev/null || true
+          ls -lh output/
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: veilbox-cloud-amd64
+          path: output/*.qcow2
+          retention-days: 30
+
+      - name: Upload build log
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-amd64
+          path: build.log
+          retention-days: 30
+
+      - name: Upload to Release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_TAG="v1.0.0"
+          if gh release view "$RELEASE_TAG" --repo Shreyas0047/veilbox-cloud &>/dev/null; then
+            echo "Uploading to release $RELEASE_TAG..."
+            gh release upload "$RELEASE_TAG" output/*.qcow2 --repo Shreyas0047/veilbox-cloud --clobber
+          else
+            echo "Creating release $RELEASE_TAG..."
+            gh release create "$RELEASE_TAG" output/*.qcow2 --repo Shreyas0047/veilbox-cloud \
+              --title "Veilbox Cloud v1.0.0" --notes "Initial cloud DevOps image"
+          fi
+
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq debootstrap qemu-utils parted rsync \
+            grub-efi-arm64-bin grub-efi-arm64-signed shim-signed
+
+      - name: Build image
+        run: |
+          sudo ARCH=arm64 bash build.sh
+          mkdir -p output
+          mv /output/*.qcow2 output/ 2>/dev/null || true
+          ls -lh output/
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: veilbox-cloud-arm64
+          path: output/*.qcow2
+          retention-days: 30
+
+      - name: Upload build log
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-arm64
+          path: build.log
+          retention-days: 30
+
+      - name: Upload to Release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_TAG="v1.0.0-arm64"
+          if gh release view "$RELEASE_TAG" --repo Shreyas0047/veilbox-cloud &>/dev/null; then
+            echo "Uploading to release $RELEASE_TAG..."
+            gh release upload "$RELEASE_TAG" output/*.qcow2 --repo Shreyas0047/veilbox-cloud --clobber
+          else
+            echo "Creating release $RELEASE_TAG..."
+            gh release create "$RELEASE_TAG" output/*.qcow2 --repo Shreyas0047/veilbox-cloud \
+              --title "Veilbox Cloud v1.0.0 (ARM64)" --notes "Initial cloud DevOps image for ARM64"
+          fi
