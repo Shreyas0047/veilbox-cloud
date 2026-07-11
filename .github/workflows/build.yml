@@ -27,7 +27,8 @@ jobs:
         run: |
           sudo bash build.sh 2>&1 | tee build.log
           mkdir -p output
-          mv /output/*.qcow2 output/ 2>/dev/null || true
+          sudo mv /output/*.qcow2 output/ 2>/dev/null
+          sudo chown "$(whoami):$(whoami)" output/*.qcow2 2>/dev/null || true
           ls -lh output/
 
       - name: Upload image
@@ -78,7 +79,8 @@ jobs:
         run: |
           sudo ARCH=arm64 bash build.sh 2>&1 | tee build.log
           mkdir -p output
-          mv /output/*.qcow2 output/ 2>/dev/null || true
+          sudo mv /output/*.qcow2 output/ 2>/dev/null
+          sudo chown "$(whoami):$(whoami)" output/*.qcow2 2>/dev/null || true
           ls -lh output/
 
       - name: Upload image
