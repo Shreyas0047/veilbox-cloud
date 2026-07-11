@@ -6,7 +6,7 @@ Minimal cloud DevOps image — Debian Trixie with Docker, Kubernetes tooling, an
 
 Download the qcow2 image from [Releases](https://github.com/Shreyas0047/veilbox-cloud/releases).
 
-### QEMU/KVM
+### QEMU/KVM (amd64)
 
 ```bash
 qemu-system-x86_64 -m 2048 -smp 2 -enable-kvm \
@@ -16,18 +16,28 @@ qemu-system-x86_64 -m 2048 -smp 2 -enable-kvm \
   -nographic -serial mon:stdio
 ```
 
-### AWS (convert to RAW and upload as AMI)
+### QEMU/KVM (arm64)
 
 ```bash
-qemu-img convert -f qcow2 -O raw veilbox-cloud-trixie-amd64.qcow2 disk.raw
-# Upload to S3, import as snapshot, register as AMI
+qemu-system-aarch64 -m 2048 -smp 2 -enable-kvm \
+  -cpu host -M virt \
+  -drive file=veilbox-cloud-trixie-arm64.qcow2,format=qcow2 \
+  -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+  -device virtio-net,netdev=net0 \
+  -nographic -serial mon:stdio
 ```
 
-### Azure (convert to VHD)
+### SSH access
+
+After boot, logs will show the IP. SSH:
 
 ```bash
-qemu-img convert -f qcow2 -O vpc -o subformat=fixed veilbox-cloud-trixie-amd64.qcow2 disk.vhd
+ssh admin@<ip>
+# or via local QEMU port forward:
+ssh admin@localhost -p 2222
 ```
+
+> SSH keys are configured via cloud-init; provide your public key or use the console to set up.
 
 ## Included Tooling
 
@@ -47,6 +57,36 @@ qemu-img convert -f qcow2 -O vpc -o subformat=fixed veilbox-cloud-trixie-amd64.q
 | dive | Docker layer inspector |
 | jq | JSON processor |
 | tmux, htop, iotop, iftop | System utilities |
+| cloud-init | First-boot provisioning |
+| UFW + AppArmor + auditd | Security hardening |
+
+## Build from Source
+
+### amd64
+
+```bash
+sudo apt install debootstrap qemu-utils parted rsync \
+  grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed dosfstools
+sudo bash build.sh
+# Output: output/veilbox-cloud-trixie-amd64.qcow2
+```
+
+### arm64
+
+```bash
+sudo apt install debootstrap qemu-utils parted rsync \
+  grub-efi-arm64-bin grub-efi-arm64-signed shim-signed dosfstools
+sudo ARCH=arm64 bash build.sh
+# Output: output/veilbox-cloud-trixie-arm64.qcow2
+```
+
+## Image Details
+
+- **Base**: Debian Trixie (cloud kernel)
+- **Disk**: qcow2 format, BIOS+EFI boot (amd64), EFI-only (arm64)
+- **Partitioning**: GPT with FAT32 ESP + ext4 root
+- **Default user**: `admin` (created by cloud-init, SSH key only)
+- **First-boot**: UFW enabled, AppArmor active, auditd running
 
 ## Security
 
@@ -55,15 +95,6 @@ qemu-img convert -f qcow2 -O vpc -o subformat=fixed veilbox-cloud-trixie-amd64.q
 - AppArmor + auditd + haveged
 - unattended-upgrades for security patches
 - cloud-init for first-boot provisioning (user creation, SSH keys)
-
-## Build from Source
-
-```bash
-sudo apt install debootstrap qemu-utils parted rsync grub-pc-bin grub-efi
-sudo bash build.sh
-```
-
-Output: `output/veilbox-cloud-trixie-amd64.qcow2`
 
 ## License
 
