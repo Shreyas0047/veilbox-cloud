@@ -332,7 +332,7 @@ GRUB
 
   # Clean up loop device
   umount "$mnt"
-  losetup -d "$loop"
+  losetup -d "/dev/$loop" 2>/dev/null || true
 
   # Convert to qcow2
   qemu-img convert -f raw -O qcow2 "$raw" "$qcow2"
