@@ -287,11 +287,13 @@ create_disk_image() {
     root_part="p1"
   fi
 
-  local loop=$(losetup --show -fP "$raw")
-  # Retry partition probe if needed
-  sleep 1
-  [ ! -e "/dev/${loop}p1" ] && partprobe "$loop" 2>/dev/null || true
-  sleep 1
+  local loop=$(losetup --show -fP "$raw" 2>/dev/null || true)
+  loop=$(basename "$loop" 2>/dev/null || echo "loop0")
+  # Wait for partition devices
+  for i in 1 2 3; do
+    [ -e "/dev/${loop}${root_part}" ] && break
+    sleep 1
+  done
 
   mkfs.ext4 -L cloud-root "/dev/${loop}${root_part}"
   mount "/dev/${loop}${root_part}" "$mnt"
@@ -302,7 +304,7 @@ create_disk_image() {
   # Install GRUB based on architecture
   mkdir -p "$mnt/boot/efi"
   if [ "$ARCH" = "amd64" ]; then
-    grub-install --target=i386-pc --boot-directory="$mnt/boot" "$loop"
+    grub-install --target=i386-pc --boot-directory="$mnt/boot" "/dev/$loop"
     grub-install --target=x86_64-efi --efi-directory="$mnt/boot/efi" \
       --boot-directory="$mnt/boot" --removable
   else
