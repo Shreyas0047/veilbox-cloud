@@ -271,15 +271,27 @@ create_disk_image() {
   # Create raw disk
   dd if=/dev/zero of="$raw" bs=1M count=0 seek=$((4 * 1024)) status=progress
 
-  # Partition
-  parted -s "$raw" mklabel gpt
-  parted -s "$raw" mkpart primary ext4 1MB 100%
-  parted -s "$raw" set 1 boot on
-
-  # Setup loop device and format
+  # Setup loop device
   local loop=$(losetup --show -fP "$raw")
-  mkfs.ext4 -L cloud-root "${loop}p1"
-  mount "${loop}p1" "$mnt"
+
+  # Partition
+  local root_part
+  if [ "$ARCH" = "amd64" ]; then
+    parted -s "$raw" mklabel gpt
+    parted -s "$raw" mkpart primary 1MB 2MB
+    parted -s "$raw" set 1 bios_grub on
+    parted -s "$raw" mkpart primary ext4 2MB 100%
+    parted -s "$raw" set 2 boot on
+    root_part="${loop}p2"
+  else
+    parted -s "$raw" mklabel gpt
+    parted -s "$raw" mkpart primary ext4 1MB 100%
+    parted -s "$raw" set 1 boot on
+    root_part="${loop}p1"
+  fi
+
+  mkfs.ext4 -L cloud-root "$root_part"
+  mount "$root_part" "$mnt"
 
   # Copy rootfs
   rsync -a "$ROOTFS/" "$mnt/"
