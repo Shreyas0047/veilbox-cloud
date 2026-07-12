@@ -4,7 +4,13 @@ Minimal cloud DevOps image — Debian Trixie with Docker, Kubernetes tooling, an
 
 ## Quick Start
 
-Download the qcow2 image from [Releases](https://github.com/Shreyas0047/veilbox-cloud/releases).
+Download the compressed qcow2 image from [Releases](https://github.com/Shreyas0047/veilbox-cloud/releases), then decompress:
+
+```bash
+gunzip veilbox-cloud-trixie-amd64.qcow2.gz
+# or for ARM64:
+gunzip veilbox-cloud-trixie-arm64.qcow2.gz
+```
 
 ### QEMU/KVM (amd64)
 

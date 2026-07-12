@@ -282,7 +282,7 @@ create_disk_image() {
   mkdir -p "$OUTPUT_DIR" "$mnt"
 
   # Create raw disk
-  dd if=/dev/zero of="$raw" bs=1M count=0 seek=$((2 * 1024)) status=progress
+  dd if=/dev/zero of="$raw" bs=1M count=0 seek=$((3 * 1024)) status=progress
 
   # Partition: [BIOS boot (amd64)] + EFI (FAT32, esp) + root (ext4)
   local efi_part root_part

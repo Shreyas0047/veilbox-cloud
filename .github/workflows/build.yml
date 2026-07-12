@@ -51,13 +51,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RELEASE_TAG="v1.0.0"
+          gzip -k output/*.qcow2
           if gh release view "$RELEASE_TAG" --repo Shreyas0047/veilbox-cloud &>/dev/null; then
             echo "Uploading to release $RELEASE_TAG..."
-            gh release upload "$RELEASE_TAG" output/*.qcow2 --repo Shreyas0047/veilbox-cloud --clobber
+            gh release upload "$RELEASE_TAG" output/*.qcow2.gz --repo Shreyas0047/veilbox-cloud --clobber
           else
             echo "Creating release $RELEASE_TAG..."
-            gh release create "$RELEASE_TAG" output/*.qcow2 --repo Shreyas0047/veilbox-cloud \
-              --title "Veilbox Cloud v1.0.0" --notes "Initial cloud DevOps image"
+            gh release create "$RELEASE_TAG" output/*.qcow2.gz --repo Shreyas0047/veilbox-cloud \
+              --title "Veilbox Cloud v1.0.0" --notes "Cloud DevOps image (gzip compressed, decompress before use)"
           fi
 
   build-arm64:
@@ -103,11 +104,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RELEASE_TAG="v1.0.0-arm64"
+          gzip -k output/*.qcow2
           if gh release view "$RELEASE_TAG" --repo Shreyas0047/veilbox-cloud &>/dev/null; then
             echo "Uploading to release $RELEASE_TAG..."
-            gh release upload "$RELEASE_TAG" output/*.qcow2 --repo Shreyas0047/veilbox-cloud --clobber
+            gh release upload "$RELEASE_TAG" output/*.qcow2.gz --repo Shreyas0047/veilbox-cloud --clobber
           else
             echo "Creating release $RELEASE_TAG..."
-            gh release create "$RELEASE_TAG" output/*.qcow2 --repo Shreyas0047/veilbox-cloud \
-              --title "Veilbox Cloud v1.0.0 (ARM64)" --notes "Initial cloud DevOps image for ARM64"
+            gh release create "$RELEASE_TAG" output/*.qcow2.gz --repo Shreyas0047/veilbox-cloud \
+              --title "Veilbox Cloud v1.0.0 (ARM64)" --notes "Cloud DevOps image for ARM64 (gzip compressed, decompress before use)"
           fi
