@@ -62,22 +62,33 @@ ssh admin@localhost -p 2222
 
 ## Build from Source
 
-### amd64
-
 ```bash
-sudo apt install debootstrap qemu-utils parted rsync \
-  grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed dosfstools
+# Install dependencies
+sudo apt install debootstrap qemu-utils parted rsync dosfstools \
+  grub-pc-bin grub-efi-amd64-bin grub-efi-amd64-signed shim-signed
+
+# Build amd64
 sudo bash build.sh
 # Output: output/veilbox-cloud-trixie-amd64.qcow2
-```
 
-### arm64
-
-```bash
-sudo apt install debootstrap qemu-utils parted rsync \
-  grub-efi-arm64-bin grub-efi-arm64-signed shim-signed dosfstools
+# Build arm64
 sudo ARCH=arm64 bash build.sh
 # Output: output/veilbox-cloud-trixie-arm64.qcow2
+```
+
+Or use the Makefile:
+
+```bash
+make build-amd64   # or: make build-arm64
+make all           # both architectures
+make release       # build + upload to GitHub Releases
+```
+
+### Smoke test
+
+```bash
+sudo apt install qemu-system-x86 ssh
+sudo QEMU_IMAGE=output/veilbox-cloud-trixie-amd64.qcow2 bash tests/smoke.sh
 ```
 
 ## Image Details
@@ -87,6 +98,26 @@ sudo ARCH=arm64 bash build.sh
 - **Partitioning**: GPT with FAT32 ESP + ext4 root
 - **Default user**: `admin` (created by cloud-init, SSH key only)
 - **First-boot**: UFW enabled, AppArmor active, auditd running
+- **Build info**: `/etc/veilbox/build-info` contains version, date, and arch
+
+## Included Tooling
+
+| Tool | Version | Purpose |
+|------|---------|---------|
+| Docker CE | 29.x | Container runtime |
+| kubectl | 1.36.2 | Kubernetes CLI |
+| Helm | 4.2.2 | Kubernetes package manager |
+| k9s | 0.40.10 | Kubernetes TUI dashboard |
+| stern | 1.32.0 | Multi-pod log tailing |
+| kind | 0.27.0 | Local Kubernetes clusters |
+| kustomize | 5.6.0 | Kubernetes config management |
+| Terraform | 1.11.0 | Infrastructure provisioning |
+| AWS CLI v2 | latest | Amazon Web Services |
+| GitHub CLI | 2.68.0 | GitHub operations |
+| yq | 4.45.1 | YAML/JSON processor |
+| dive | 0.12.0 | Docker layer inspector |
+
+Plus: python3, git, jq, tmux, htop, iotop, iftop
 
 ## Security
 

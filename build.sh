@@ -7,6 +7,8 @@ MIRROR="${MIRROR:-http://deb.debian.org/debian}"
 OUTPUT_DIR="${OUTPUT_DIR:-/output}"
 ROOTFS="/tmp/rootfs"
 IMAGE_NAME="${IMAGE_NAME:-veilbox-cloud-${SUITE}-${ARCH}}"
+BUILD_VERSION="${BUILD_VERSION:-$(git describe --tags --always 2>/dev/null || echo "dev")}"
+BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
@@ -80,29 +82,26 @@ install_tarball() {
   local name="$1" url="$2" binary="${3:-$1}"
   local dest="/usr/local/bin/$name"
   local tmp=$(mktemp -d)
+  local ok=0
   if curl -fsSL --connect-timeout 15 --max-time 120 "$url" -o "$tmp/pkg" 2>/dev/null; then
     case "$url" in
-      *.zip)
-        unzip -q "$tmp/pkg" -d "$tmp" 2>/dev/null
-        ;;
-      *)
-        tar xzf "$tmp/pkg" -C "$tmp" 2>/dev/null || true
-        ;;
+      *.zip) unzip -q "$tmp/pkg" -d "$tmp" 2>/dev/null ;;
+      *)     tar xzf "$tmp/pkg" -C "$tmp" 2>/dev/null || true ;;
     esac
-    find "$tmp" -name "$binary" -type f ! -name "*.tar.gz" ! -name "*.zip" -exec cp {} "$ROOTFS$dest" \; 2>/dev/null
-    if [ ! -f "$ROOTFS$dest" ]; then
-      # Fallback: find the largest file in tmp
-      local best=$(find "$tmp" -maxdepth 3 -type f -executable -o -type f -name "$binary" 2>/dev/null | head -1)
-      [ -n "$best" ] && cp "$best" "$ROOTFS$dest" 2>/dev/null || true
+    # Find the binary and copy it
+    local found=$(find "$tmp" -type f \( -name "$binary" -o -name "${binary}.exe" \) 2>/dev/null | head -1)
+    if [ -z "$found" ]; then
+      # Try finding any executable that matches the expected name pattern
+      found=$(find "$tmp" -type f -executable -o -type f -name "$binary" 2>/dev/null | head -1)
     fi
-    chmod +x "$ROOTFS$dest" 2>/dev/null || true
-    if [ -f "$ROOTFS$dest" ]; then
-      echo "  $name installed"
-    else
-      echo "  [WARN] $name extraction failed"
+    if [ -n "$found" ]; then
+      cp "$found" "$ROOTFS$dest" 2>/dev/null && chmod +x "$ROOTFS$dest" 2>/dev/null && ok=1
     fi
+  fi
+  if [ "$ok" = "1" ]; then
+    echo "  $name installed"
   else
-    echo "  [WARN] $name download failed"
+    echo "  [WARN] $name install failed"
   fi
   rm -rf "$tmp"
 }
@@ -117,36 +116,41 @@ install_devops_tools() {
     "https://get.helm.sh/helm-v4.2.2-linux-${ARCH}.tar.gz" "helm"
 
   install_tarball "yq" \
-    "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}.tar.gz" "yq"
+    "https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_${ARCH}.tar.gz" "yq"
 
   install_tarball "dive" \
-    "https://github.com/wagoodman/dive/releases/latest/download/dive_0.12.0_linux_${ARCH}.tar.gz" "dive"
+    "https://github.com/wagoodman/dive/releases/download/v0.12.0/dive_0.12.0_linux_${ARCH}.tar.gz" "dive"
 
   install_tarball "k9s" \
-    "https://github.com/derailed/k9s/releases/latest/download/k9s_Linux_${ARCH}.tar.gz" "k9s"
+    "https://github.com/derailed/k9s/releases/download/v0.40.10/k9s_Linux_${ARCH}.tar.gz" "k9s"
 
   install_tarball "stern" \
-    "https://github.com/stern/stern/releases/latest/download/stern_1.32.0_linux_${ARCH}.tar.gz" "stern"
+    "https://github.com/stern/stern/releases/download/v1.32.0/stern_1.32.0_linux_${ARCH}.tar.gz" "stern"
 
   install_binary "kind" \
-    "https://github.com/kubernetes-sigs/kind/releases/latest/download/kind-linux-${ARCH}"
+    "https://github.com/kubernetes-sigs/kind/releases/download/v0.27.0/kind-linux-${ARCH}"
 
   install_tarball "kustomize" \
-    "https://github.com/kubernetes-sigs/kustomize/releases/latest/download/kustomize_v5.6.0_linux_${ARCH}.tar.gz" "kustomize"
+    "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.6.0/kustomize_v5.6.0_linux_${ARCH}.tar.gz" "kustomize"
 
   install_tarball "terraform" \
     "https://releases.hashicorp.com/terraform/1.11.0/terraform_1.11.0_linux_${ARCH}.zip" "terraform"
 
   install_tarball "gh" \
-    "https://github.com/cli/cli/releases/latest/download/gh_2.68.0_linux_${ARCH}.tar.gz" "gh"
+    "https://github.com/cli/cli/releases/download/v2.68.0/gh_2.68.0_linux_${ARCH}.tar.gz" "gh"
 
   # AWS CLI v2
+  local aws_arch="${ARCH/amd64/x86_64}"
+  aws_arch="${aws_arch/arm64/aarch64}"
   local aws_tmp=$(mktemp -d)
-  if curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}.zip" -o "$aws_tmp/awscliv2.zip" 2>/dev/null; then
+  if curl -fsSL --connect-timeout 15 --max-time 120 \
+    "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}.zip" \
+    -o "$aws_tmp/awscliv2.zip" 2>/dev/null; then
     unzip -q "$aws_tmp/awscliv2.zip" -d "$aws_tmp"
     cp -r "$aws_tmp/aws/" "$ROOTFS/tmp/aws-install"
     chroot "$ROOTFS" /tmp/aws-install/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli 2>/dev/null || true
     rm -rf "$ROOTFS/tmp/aws-install" 2>/dev/null || true
+    echo "  aws installed"
   else
     echo "  [WARN] aws download failed"
   fi
@@ -252,6 +256,15 @@ FB
 
   # Docker group
   chroot "$ROOTFS" groupadd -f docker 2>/dev/null || true
+
+  # Build info
+  mkdir -p "$ROOTFS/etc/veilbox"
+  cat > "$ROOTFS/etc/veilbox/build-info" <<EOF
+BUILD_VERSION=${BUILD_VERSION}
+BUILD_DATE=${BUILD_DATE}
+ARCH=${ARCH}
+SUITE=${SUITE}
+EOF
 
   # Clean up
   chroot "$ROOTFS" apt-get clean -qq 2>/dev/null || true
