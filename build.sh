@@ -3,10 +3,11 @@ set -e
 
 ARCH="${ARCH:-amd64}"
 SUITE="${SUITE:-trixie}"
+VARIANT="${VARIANT:-full}"  # full or minimal
 MIRROR="${MIRROR:-http://deb.debian.org/debian}"
 OUTPUT_DIR="${OUTPUT_DIR:-/output}"
 ROOTFS="/tmp/rootfs"
-IMAGE_NAME="${IMAGE_NAME:-veilbox-cloud-${SUITE}-${ARCH}}"
+IMAGE_NAME="${IMAGE_NAME:-veilbox-cloud-${SUITE}-${ARCH}-${VARIANT}}"
 BUILD_VERSION="${BUILD_VERSION:-$(git describe --tags --always 2>/dev/null || echo "dev")}"
 BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 
@@ -321,6 +322,35 @@ EOF
   rm -f "$ROOTFS/etc/resolv.conf"
 }
 
+vulnerability_scan() {
+  info "Running vulnerability scan..."
+  local report="${OUTPUT_DIR}/${IMAGE_NAME}-vuln.json"
+  # Download static trivy binary and scan the rootfs
+  local trivy_tmp=$(mktemp -d)
+  if curl -fsSL --connect-timeout 15 --max-time 60 \
+    "https://github.com/aquasecurity/trivy/releases/download/v0.61.0/trivy_0.61.0_Linux-${ARCH}.tar.gz" \
+    -o "$trivy_tmp/trivy.tar.gz" 2>/dev/null; then
+    tar xzf "$trivy_tmp/trivy.tar.gz" -C "$trivy_tmp" 2>/dev/null || true
+    local trivy_bin=$(find "$trivy_tmp" -name "trivy" -type f 2>/dev/null | head -1)
+    if [ -n "$trivy_bin" ]; then
+      chmod +x "$trivy_bin"
+      # Run scan with DB cache in tmpdir so it doesn't pollute
+      TRIVY_TEMP_DIR="$trivy_tmp/db" "$trivy_bin" filesystem \
+        --severity HIGH,CRITICAL \
+        --no-progress \
+        --format json \
+        --db-repository "ghcr.io/aquasecurity/trivy-db:2" \
+        "$ROOTFS" > "$report" 2>/dev/null || true
+      local critical=$(grep -o '"Severity":"CRITICAL"' "$report" 2>/dev/null | wc -l)
+      local high=$(grep -o '"Severity":"HIGH"' "$report" 2>/dev/null | wc -l)
+      echo "  CRITICAL: $critical, HIGH: $high"
+      # Also copy report into the image
+      cp "$report" "$ROOTFS/etc/veilbox/vuln-report.json" 2>/dev/null || true
+    fi
+  fi
+  rm -rf "$trivy_tmp" 2>/dev/null || true
+}
+
 create_disk_image() {
   info "Creating disk image..."
   local raw="${OUTPUT_DIR}/${IMAGE_NAME}.raw"
@@ -433,8 +463,9 @@ chmod +x "$ROOTFS/usr/sbin/policy-rc.d"
 
 install_packages
 install_docker
-install_devops_tools
+[ "$VARIANT" != "minimal" ] && install_devops_tools
 configure_system
+vulnerability_scan
 
 # Remove policy-rc.d
 rm -f "$ROOTFS/usr/sbin/policy-rc.d"

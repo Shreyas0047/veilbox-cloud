@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      variant:
+        description: 'Image variant (full or minimal)'
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - minimal
   schedule:
     - cron: '0 6 * * 0'  # weekly Sunday 06:00 UTC rebuild
 
@@ -27,7 +35,7 @@ jobs:
 
       - name: Build image
         run: |
-          sudo bash build.sh 2>&1 | tee build.log
+          sudo VARIANT=${{ inputs.variant || 'full' }} bash build.sh 2>&1 | tee build.log
           mkdir -p output
           sudo mv /output/*.qcow2 output/ 2>/dev/null
           sudo chown "$(whoami):$(whoami)" output/*.qcow2 2>/dev/null || true
@@ -36,7 +44,7 @@ jobs:
       - name: Upload image
         uses: actions/upload-artifact@v4
         with:
-          name: veilbox-cloud-amd64
+          name: veilbox-cloud-amd64-${{ inputs.variant || 'full' }}
           path: output/*.qcow2
           retention-days: 30
 
@@ -52,22 +60,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          VARIANT=${{ inputs.variant || 'full' }}
           RELEASE_TAG="v1.0.0"
+          [ "$VARIANT" = "minimal" ] && RELEASE_TAG="v1.0.0-minimal"
           gzip -k output/*.qcow2
-          NOTES="## Veilbox Cloud v1.0.0 (amd64)
+          NOTES="## Veilbox Cloud v1.0.0 ($VARIANT, amd64)
           Built: $(date -u +%Y-%m-%dT%H:%M:%SZ)
           Debian trixie cloud kernel, gzip compressed
-          \`\`\`
-          $(zcat output/*.qcow2.gz > /dev/null 2>&1 && echo "Valid gzip" || echo "Invalid")
-          \`\`\`
           "
           if gh release view "$RELEASE_TAG" --repo Shreyas0047/veilbox-cloud &>/dev/null; then
-            echo "Uploading to release $RELEASE_TAG..."
             gh release upload "$RELEASE_TAG" output/*.qcow2.gz --repo Shreyas0047/veilbox-cloud --clobber
           else
-            echo "Creating release $RELEASE_TAG..."
             gh release create "$RELEASE_TAG" output/*.qcow2.gz --repo Shreyas0047/veilbox-cloud \
-              --title "Veilbox Cloud v1.0.0" --notes "$NOTES"
+              --title "Veilbox Cloud v1.0.0 ($VARIANT)" --notes "$NOTES"
           fi
 
   build-arm64:
@@ -87,7 +92,7 @@ jobs:
 
       - name: Build image
         run: |
-          sudo ARCH=arm64 bash build.sh 2>&1 | tee build.log
+          sudo ARCH=arm64 VARIANT=${{ inputs.variant || 'full' }} bash build.sh 2>&1 | tee build.log
           mkdir -p output
           sudo mv /output/*.qcow2 output/ 2>/dev/null
           sudo chown "$(whoami):$(whoami)" output/*.qcow2 2>/dev/null || true
@@ -96,7 +101,7 @@ jobs:
       - name: Upload image
         uses: actions/upload-artifact@v4
         with:
-          name: veilbox-cloud-arm64
+          name: veilbox-cloud-arm64-${{ inputs.variant || 'full' }}
           path: output/*.qcow2
           retention-days: 30
 
@@ -112,17 +117,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          VARIANT=${{ inputs.variant || 'full' }}
           RELEASE_TAG="v1.0.0-arm64"
+          [ "$VARIANT" = "minimal" ] && RELEASE_TAG="v1.0.0-minimal-arm64"
           gzip -k output/*.qcow2
-          NOTES="## Veilbox Cloud v1.0.0 (arm64)
+          NOTES="## Veilbox Cloud v1.0.0 ($VARIANT, arm64)
           Built: $(date -u +%Y-%m-%dT%H:%M:%SZ)
           Debian trixie cloud kernel, gzip compressed
           "
           if gh release view "$RELEASE_TAG" --repo Shreyas0047/veilbox-cloud &>/dev/null; then
-            echo "Uploading to release $RELEASE_TAG..."
             gh release upload "$RELEASE_TAG" output/*.qcow2.gz --repo Shreyas0047/veilbox-cloud --clobber
           else
-            echo "Creating release $RELEASE_TAG..."
             gh release create "$RELEASE_TAG" output/*.qcow2.gz --repo Shreyas0047/veilbox-cloud \
-              --title "Veilbox Cloud v1.0.0 (ARM64)" --notes "$NOTES"
+              --title "Veilbox Cloud v1.0.0 ($VARIANT, ARM64)" --notes "$NOTES"
           fi
