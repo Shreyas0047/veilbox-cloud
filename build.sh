@@ -68,6 +68,39 @@ install_docker() {
   rm -f "$ROOTFS/etc/apt/sources.list.d/docker.list"
 }
 
+install_gcloud() {
+  info "Installing Google Cloud CLI and guest agent..."
+  local repo="deb [signed-by=$ROOTFS/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main"
+  curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+    -o "$ROOTFS/usr/share/keyrings/cloud.google.gpg" 2>/dev/null || true
+  echo "$repo" > "$ROOTFS/etc/apt/sources.list.d/google-cloud.list" 2>/dev/null || true
+  chroot "$ROOTFS" apt-get update -qq 2>/dev/null || true
+  chroot "$ROOTFS" apt-get install -y -qq google-cloud-cli 2>/dev/null || true
+  rm -f "$ROOTFS/etc/apt/sources.list.d/google-cloud.list" 2>/dev/null || true
+}
+
+install_az() {
+  info "Installing Azure CLI..."
+  curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+    -o "$ROOTFS/usr/share/keyrings/microsoft.asc" 2>/dev/null || true
+  chmod a+r "$ROOTFS/usr/share/keyrings/microsoft.asc" 2>/dev/null || true
+  local repo="deb [arch=$ARCH signed-by=/usr/share/keyrings/microsoft.asc] https://packages.microsoft.com/repos/azure-cli/ ${SUITE} main"
+  echo "$repo" > "$ROOTFS/etc/apt/sources.list.d/azure-cli.list" 2>/dev/null || true
+  chroot "$ROOTFS" apt-get update -qq 2>/dev/null || true
+  chroot "$ROOTFS" apt-get install -y -qq azure-cli 2>/dev/null || true
+  rm -f "$ROOTFS/etc/apt/sources.list.d/azure-cli.list" 2>/dev/null || true
+}
+
+install_guest_agents() {
+  info "Installing cloud guest agents..."
+  # Azure WALA (in Debian)
+  chroot "$ROOTFS" apt-get install -y -qq walinuxagent 2>/dev/null || true
+  # AWS SSM Agent via snap
+  command -v snap >/dev/null 2>&1 && snap install amazon-ssm-agent --classic 2>/dev/null || true
+  # GCP guest agent (from Google repo, installed above in install_gcloud)
+  chroot "$ROOTFS" apt-get install -y -qq google-compute-engine 2>/dev/null || true
+}
+
 install_binary() {
   local name="$1" url="$2"
   local dest="/usr/local/bin/$name"
@@ -322,6 +355,98 @@ EOF
   rm -f "$ROOTFS/etc/resolv.conf"
 }
 
+apply_cis_hardening() {
+  info "Applying CIS-inspired hardening..."
+
+  # sysctl kernel hardening
+  cat > "$ROOTFS/etc/sysctl.d/99-veilbox.conf" <<'SYS'
+# IP forwarding / spoofing protection
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+# SYN flood protection
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_syn_retries = 5
+# ICMP hardening
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+# Disable IP forwarding (single-host image)
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+# kernel pointer hiding
+kernel.kptr_restrict = 2
+kernel.dmesg_restrict = 1
+kernel.printk = 3 3 3 3
+# reduce perf events exposure
+kernel.perf_event_paranoid = 3
+# ptrace scope
+kernel.yama.ptrace_scope = 1
+# ASLR
+kernel.randomize_va_space = 2
+# Restrict BPF
+net.core.bpf_jit_enable = 0
+SYS
+
+  # SSH hardening
+  sed -i 's/^#Protocol 2/Protocol 2/' "$ROOTFS/etc/ssh/sshd_config"
+  sed -i 's/^#LogLevel INFO/LogLevel VERBOSE/' "$ROOTFS/etc/ssh/sshd_config"
+  sed -i 's/^#MaxAuthTries 6/MaxAuthTries 3/' "$ROOTFS/etc/ssh/sshd_config"
+  sed -i 's/^#MaxSessions 10/MaxSessions 5/' "$ROOTFS/etc/ssh/sshd_config"
+  sed -i 's/^#ClientAliveInterval 0/ClientAliveInterval 300/' "$ROOTFS/etc/ssh/sshd_config"
+  sed -i 's/^#ClientAliveCountMax 3/ClientAliveCountMax 2/' "$ROOTFS/etc/ssh/sshd_config"
+  cat >> "$ROOTFS/etc/ssh/sshd_config" <<'SSHD'
+# Veilbox hardening
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+KexAlgorithms curve25519-sha256,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512
+Macs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+ClientAliveInterval 300
+ClientAliveCountMax 2
+MaxStartups 10:30:60
+SSHD
+
+  # Restrict /etc/issue and motd
+  > "$ROOTFS/etc/issue"
+  > "$ROOTFS/etc/issue.net"
+  cat > "$ROOTFS/etc/motd" <<'MOTD'
+WARNING: Unauthorized access to this system is prohibited.
+MOTD
+
+  # Lock down important files
+  chmod 640 "$ROOTFS/etc/shadow" 2>/dev/null || true
+  chmod 640 "$ROOTFS/etc/gshadow" 2>/dev/null || true
+  chmod 644 "$ROOTFS/etc/passwd" 2>/dev/null || true
+  chmod 644 "$ROOTFS/etc/group" 2>/dev/null || true
+
+  # auditd rules
+  mkdir -p "$ROOTFS/etc/audit/rules.d"
+  cat > "$ROOTFS/etc/audit/rules.d/99-veilbox.rules" <<'AUDIT'
+# Monitor privilege escalation
+-w /etc/sudoers -p wa -k sudoers
+-w /etc/sudoers.d -p wa -k sudoers
+-w /etc/passwd -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+# Monitor critical system files
+-w /etc/ssh/sshd_config -p wa -k sshd_config
+-w /etc/hosts -p wa -k hosts
+-w /etc/hostname -p wa -k hostname
+# Monitor login/logout
+-w /var/log/wtmp -p wa -k logins
+-w /var/log/btmp -p wa -k logins
+-w /var/run/faillock -p wa -k logins
+# Monitor kernel module loading
+-w /sbin/insmod -p x -k modules
+-w /sbin/rmmod -p x -k modules
+-w /sbin/modprobe -p x -k modules
+# Monitor network configuration
+-w /etc/network -p wa -k networking
+# Monitor Docker
+-w /var/run/docker.sock -p rwxa -k docker
+AUDIT
+}
+
 vulnerability_scan() {
   info "Running vulnerability scan..."
   local report="${OUTPUT_DIR}/${IMAGE_NAME}-vuln.json"
@@ -461,8 +586,12 @@ chmod +x "$ROOTFS/usr/sbin/policy-rc.d"
 
 install_packages
 install_docker
+install_guest_agents
 [ "$VARIANT" != "minimal" ] && install_devops_tools
+[ "$VARIANT" != "minimal" ] && install_gcloud
+[ "$VARIANT" != "minimal" ] && install_az
 configure_system
+apply_cis_hardening
 vulnerability_scan
 
 # Remove policy-rc.d
