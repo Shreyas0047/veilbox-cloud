@@ -325,6 +325,7 @@ EOF
 vulnerability_scan() {
   info "Running vulnerability scan..."
   local report="${OUTPUT_DIR}/${IMAGE_NAME}-vuln.json"
+  mkdir -p "$OUTPUT_DIR"
   local trivy_arch="${ARCH/amd64/64bit}"
   trivy_arch="${trivy_arch/arm64/ARM64}"
   local trivy_tmp=$(mktemp -d)

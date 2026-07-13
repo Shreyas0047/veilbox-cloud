@@ -37,8 +37,8 @@ jobs:
         run: |
           sudo VARIANT=${{ inputs.variant || 'full' }} bash build.sh 2>&1 | tee build.log
           mkdir -p output
-          sudo mv /output/*.qcow2 output/ 2>/dev/null
-          sudo chown "$(whoami):$(whoami)" output/*.qcow2 2>/dev/null || true
+          sudo mv /output/*.qcow2 /output/*-vuln.json output/ 2>/dev/null
+          sudo chown "$(whoami):$(whoami)" output/* 2>/dev/null || true
           ls -lh output/
 
       - name: Upload image
@@ -51,8 +51,22 @@ jobs:
       - name: Upload build log
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-amd64
+          name: build-log-arm64-${{ inputs.variant || 'full' }}
           path: build.log
+          retention-days: 30
+
+      - name: Upload vulnerability report
+        uses: actions/upload-artifact@v4
+        with:
+          name: vuln-report-arm64-${{ inputs.variant || 'full' }}
+          path: output/*-vuln.json
+          retention-days: 30
+
+      - name: Upload vulnerability report
+        uses: actions/upload-artifact@v4
+        with:
+          name: vuln-report-amd64-${{ inputs.variant || 'full' }}
+          path: output/*-vuln.json
           retention-days: 30
 
       - name: Upload to Release
@@ -94,8 +108,8 @@ jobs:
         run: |
           sudo ARCH=arm64 VARIANT=${{ inputs.variant || 'full' }} bash build.sh 2>&1 | tee build.log
           mkdir -p output
-          sudo mv /output/*.qcow2 output/ 2>/dev/null
-          sudo chown "$(whoami):$(whoami)" output/*.qcow2 2>/dev/null || true
+          sudo mv /output/*.qcow2 /output/*-vuln.json output/ 2>/dev/null
+          sudo chown "$(whoami):$(whoami)" output/* 2>/dev/null || true
           ls -lh output/
 
       - name: Upload image
