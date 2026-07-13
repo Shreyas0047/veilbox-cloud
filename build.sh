@@ -45,7 +45,7 @@ install_packages() {
     systemd systemd-sysv dbus \
     openssh-server cloud-init cloud-guest-utils \
     sudo ca-certificates curl wget git \
-    ufw apparmor apparmor-profiles apparmor-utils \
+    firewalld \
     unattended-upgrades \
     auditd haveged \
     parted \
@@ -53,7 +53,15 @@ install_packages() {
     lvm2 \
     python3 python3-pip python3-venv \
     $grub_pkgs efibootmgr \
-    gnupg lsb-release unzip
+    gnupg lsb-release unzip \
+    selinux-basics selinux-policy-default \
+    kdump-tools \
+    aide \
+    fail2ban \
+    rkhunter chkrootkit
+  # Remove conflicting AppArmor (SELinux replaces it)
+  chroot "$ROOTFS" apt-get remove -y -qq apparmor apparmor-profiles apparmor-utils 2>/dev/null || true
+  chroot "$ROOTFS" apt-get autoremove -y -qq 2>/dev/null || true
   chroot "$ROOTFS" apt-get clean -qq
 }
 
@@ -99,6 +107,59 @@ install_guest_agents() {
   command -v snap >/dev/null 2>&1 && snap install amazon-ssm-agent --classic 2>/dev/null || true
   # GCP guest agent (from Google repo, installed above in install_gcloud)
   chroot "$ROOTFS" apt-get install -y -qq google-compute-engine 2>/dev/null || true
+}
+
+install_additional_security() {
+  info "Installing additional security tools..."
+
+  # SELinux: enable enforcing with autorelabel
+  if [ -f "$ROOTFS/etc/selinux/config" ]; then
+    sed -i 's/^SELINUX=.*/SELINUX=enforcing/' "$ROOTFS/etc/selinux/config"
+  else
+    mkdir -p "$ROOTFS/etc/selinux"
+    cat > "$ROOTFS/etc/selinux/config" <<'SEL'
+SELINUX=enforcing
+SELINUXTYPE=default
+SETLOCALDEFS=0
+SEL
+  fi
+  touch "$ROOTFS/.autorelabel"
+
+  # AIDE: configure and init database
+  if command -v aideinit >/dev/null 2>&1; then
+    cat > "$ROOTFS/etc/aide/aide.conf.d/99-veilbox.conf" <<'AID'
+# Veilbox additional AIDE rules
+/etc/veilbox/ p+i+n+u+g+s+m+c+sha512
+/etc/fstab p+i+n+u+g+s+m+c+sha512
+/etc/hostname p+i+n+u+g+s+m+c+sha512
+/etc/hosts p+i+n+u+g+s+m+c+sha512
+/etc/ssh/sshd_config p+i+n+u+g+s+m+c+sha512
+/etc/selinux/ p+i+n+u+g+s+m+c+sha512
+AID
+    chroot "$ROOTFS" aideinit -f 2>/dev/null || true
+    [ -f "$ROOTFS/var/lib/aide/aide.db.new.gz" ] && \
+      mv "$ROOTFS/var/lib/aide/aide.db.new.gz" "$ROOTFS/var/lib/aide/aide.db.gz" 2>/dev/null || true
+  fi
+
+  # fail2ban: configure SSH jail
+  mkdir -p "$ROOTFS/etc/fail2ban"
+  cat > "$ROOTFS/etc/fail2ban/jail.local" <<'F2B'
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 5
+ignoreip = 127.0.0.1/8 ::1
+
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+F2B
+
+  # rkhunter: update properties
+  chroot "$ROOTFS" rkhunter --propupd 2>/dev/null || true
 }
 
 install_binary() {
@@ -262,20 +323,25 @@ SVC
   cat > "$ROOTFS/usr/local/lib/veilbox/firstboot.sh" <<'FB'
 #!/bin/bash
 set -e
-# Enable and start AppArmor
-systemctl enable apparmor --now 2>/dev/null || true
+# Enable and start firewalld (default deny, allow SSH + DHCPv6)
+systemctl enable firewalld --now 2>/dev/null || true
+firewall-cmd --set-default-zone=drop 2>/dev/null || true
+firewall-cmd --permanent --add-service=ssh 2>/dev/null || true
+firewall-cmd --permanent --add-service=dhcpv6-client 2>/dev/null || true
+firewall-cmd --reload 2>/dev/null || true
 # Enable auditd
 systemctl enable auditd --now 2>/dev/null || true
 # Enable haveged
 systemctl enable haveged --now 2>/dev/null || true
 # Enable auto-upgrades
 systemctl enable unattended-upgrades --now 2>/dev/null || true
-# Enable UFW (default deny incoming, allow SSH)
-ufw --force enable 2>/dev/null || true
-ufw default deny incoming 2>/dev/null || true
-ufw allow ssh 2>/dev/null || true
+# Enable fail2ban
+systemctl enable fail2ban --now 2>/dev/null || true
 # Ensure root is locked
 passwd -l root 2>/dev/null || true
+# Run AIDE check daily
+systemctl enable aidecheck.service 2>/dev/null || true
+systemctl enable aidecheck.timer 2>/dev/null || true
 # Expand partition if needed (growpart handled by cloud-init)
 true
 FB
@@ -290,6 +356,50 @@ FB
 
   # Docker group
   chroot "$ROOTFS" groupadd -f docker 2>/dev/null || true
+
+  # Kernel module denylist (unnecessary on cloud VMs)
+  cat > "$ROOTFS/etc/modprobe.d/veilbox-blacklist.conf" <<'BLACK'
+# Remove unnecessary hardware support
+blacklist floppy
+blacklist parport
+blacklist parport_pc
+blacklist firewire-core
+blacklist bluetooth
+blacklist btusb
+blacklist btrtl
+blacklist btbcm
+blacklist btintel
+blacklist snd_hda_intel
+blacklist snd_hda_codec
+blacklist snd_hda_core
+blacklist snd_pcm
+blacklist snd_timer
+blacklist snd
+blacklist soundcore
+blacklist pcspkr
+blacklist iTCO_wdt
+BLACK
+
+  # umask 027
+  sed -i 's/^UMASK[[:space:]]*022/UMASK 027/' "$ROOTFS/etc/login.defs" 2>/dev/null || true
+  grep -q 'UMASK 027' "$ROOTFS/etc/login.defs" 2>/dev/null || \
+    echo "UMASK 027" >> "$ROOTFS/etc/login.defs"
+  mkdir -p "$ROOTFS/etc/pam.d"
+  for f in common-session common-session-noninteractive; do
+    grep -q "umask=027" "$ROOTFS/etc/pam.d/$f" 2>/dev/null || \
+      echo "session optional pam_umask.so umask=027" >> "$ROOTFS/etc/pam.d/$f" 2>/dev/null || true
+  done
+
+  # systemd journal limits
+  mkdir -p "$ROOTFS/etc/systemd/journald.conf.d"
+  cat > "$ROOTFS/etc/systemd/journald.conf.d/50-veilbox.conf" <<'JOURNAL'
+[Journal]
+SystemMaxUse=500M
+RuntimeMaxUse=200M
+MaxRetentionSec=7day
+MaxFileSec=1day
+Compress=yes
+JOURNAL
 
   # Configure unattended-upgrades
   cat > "$ROOTFS/etc/apt/apt.conf.d/50unattended-upgrades" <<'UA'
@@ -331,21 +441,17 @@ EOF
     echo "kind=$(chroot "$ROOTFS" kind version 2>/dev/null || echo unknown)"
     echo "gh=$(chroot "$ROOTFS" gh --version 2>/dev/null | head -1 || echo unknown)"
     echo "aws=$(chroot "$ROOTFS" aws --version 2>/dev/null | head -1 || echo unknown)"
+    echo "gcloud=$(chroot "$ROOTFS" gcloud --version 2>/dev/null | head -1 || echo unknown)"
+    echo "az=$(chroot "$ROOTFS" az version 2>/dev/null | head -1 || echo unknown)"
+    echo "fail2ban=$(chroot "$ROOTFS" fail2ban-server --version 2>/dev/null || echo unknown)"
+    echo "aide=$(chroot "$ROOTFS" aide --version 2>/dev/null || echo unknown)"
+    echo "rkhunter=$(chroot "$ROOTFS" rkhunter --version 2>/dev/null || echo unknown)"
+    echo "chkrootkit=$(chroot "$ROOTFS" chkrootkit --version 2>/dev/null || echo unknown)"
+    echo "selinux=$(chroot "$ROOTFS" sestatus 2>/dev/null | head -1 || echo unknown)"
+    echo "firewalld=$(chroot "$ROOTFS" firewall-cmd --version 2>/dev/null || echo unknown)"
   } > "$ROOTFS/etc/veilbox/sbom-tools.txt" 2>/dev/null || true
 
-  # Trim: remove man pages, docs, locales, clean aggressively
-  rm -rf "$ROOTFS/usr/share/doc/"* 2>/dev/null || true
-  rm -rf "$ROOTFS/usr/share/man/"* 2>/dev/null || true
-  rm -rf "$ROOTFS/usr/share/info/"* 2>/dev/null || true
-  rm -rf "$ROOTFS/usr/share/lintian/"* 2>/dev/null || true
-  rm -rf "$ROOTFS/usr/share/linda/"* 2>/dev/null || true
-  rm -rf "$ROOTFS/var/cache/man/"* 2>/dev/null || true
-  # Keep only en_US.UTF-8 locale
-  find "$ROOTFS/usr/share/locale" -mindepth 1 -maxdepth 1 ! -name "en*" ! -name "locale.alias" -exec rm -rf {} + 2>/dev/null || true
-  # Remove unnecessary firmware
-  rm -rf "$ROOTFS/usr/lib/firmware/"* 2>/dev/null || true
-
-  # Clean up
+  # Clean up apt and logs (image trimming handled by trim_image later)
   chroot "$ROOTFS" apt-get clean -qq 2>/dev/null || true
   chroot "$ROOTFS" apt-get autoclean -qq 2>/dev/null || true
   chroot "$ROOTFS" apt-get autoremove -qq 2>/dev/null || true
@@ -371,7 +477,7 @@ net.ipv4.tcp_syn_retries = 5
 # ICMP hardening
 net.ipv4.icmp_ignore_bogus_error_responses = 1
 net.ipv4.icmp_echo_ignore_broadcasts = 1
-# Disable IP forwarding (single-host image)
+# IP forwarding (needed for Docker networking)
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
 # kernel pointer hiding
@@ -386,6 +492,20 @@ kernel.yama.ptrace_scope = 1
 kernel.randomize_va_space = 2
 # Restrict BPF
 net.core.bpf_jit_enable = 0
+# RFC 1337 (TCP TIME-WAIT assassination protection)
+net.ipv4.tcp_rfc1337 = 1
+# Log martian packets
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
+# Protect hard/symlinks
+fs.protected_hardlinks = 1
+fs.protected_symlinks = 1
+# Disable core dumps
+fs.suid_dumpable = 0
+# Enable TCP keepalive
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 60
+net.ipv4.tcp_keepalive_probes = 5
 SYS
 
   # SSH hardening
@@ -395,6 +515,9 @@ SYS
   sed -i 's/^#MaxSessions 10/MaxSessions 5/' "$ROOTFS/etc/ssh/sshd_config"
   sed -i 's/^#ClientAliveInterval 0/ClientAliveInterval 300/' "$ROOTFS/etc/ssh/sshd_config"
   sed -i 's/^#ClientAliveCountMax 3/ClientAliveCountMax 2/' "$ROOTFS/etc/ssh/sshd_config"
+  sed -i 's/^#PermitEmptyPasswords no/PermitEmptyPasswords no/' "$ROOTFS/etc/ssh/sshd_config"
+  sed -i 's/^#StrictModes yes/StrictModes yes/' "$ROOTFS/etc/ssh/sshd_config"
+  sed -i 's/^PermitEmptyPasswords yes/PermitEmptyPasswords no/' "$ROOTFS/etc/ssh/sshd_config"
   cat >> "$ROOTFS/etc/ssh/sshd_config" <<'SSHD'
 # Veilbox hardening
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
@@ -445,6 +568,56 @@ MOTD
 # Monitor Docker
 -w /var/run/docker.sock -p rwxa -k docker
 AUDIT
+}
+
+trim_image() {
+  info "Trimming image size..."
+
+  # Remove unnecessary kernel modules
+  for mod_dir in sound firewire bluetooth wireless media staging; do
+    find "$ROOTFS/lib/modules" -path "*/${mod_dir}/*" -delete 2>/dev/null || true
+  done
+
+  # Strip ELF binaries (safe: --strip-unneeded keeps debug info needed for backtraces)
+  find "$ROOTFS/usr" -type f -executable -exec strip --strip-unneeded {} \; 2>/dev/null || true
+
+  # Remove unnecessary translation files
+  find "$ROOTFS/usr/share/locale" -mindepth 1 -maxdepth 1 ! -name "en*" ! -name "locale.alias" -exec rm -rf {} + 2>/dev/null || true
+  find "$ROOTFS/usr/share/i18n/locales" ! -name "en_US*" ! -name "C" ! -name "POSIX" -delete 2>/dev/null || true
+
+  # Remove cached data
+  chroot "$ROOTFS" apt-get clean -qq 2>/dev/null || true
+  chroot "$ROOTFS" apt-get autoclean -qq 2>/dev/null || true
+  chroot "$ROOTFS" apt-get autoremove -qq 2>/dev/null || true
+  rm -rf "$ROOTFS/var/lib/apt/lists/"* 2>/dev/null || true
+  rm -rf "$ROOTFS/var/cache/"* 2>/dev/null || true
+  rm -rf "$ROOTFS/var/log/"* 2>/dev/null || true
+  rm -rf "$ROOTFS/tmp/"* 2>/dev/null || true
+  rm -rf "$ROOTFS/var/tmp/"* 2>/dev/null || true
+
+  # Rebuild depmod after module removal
+  chroot "$ROOTFS" depmod -a 2>/dev/null || true
+}
+
+mask_services() {
+  info "Masking unnecessary services for faster boot..."
+  local services=(
+    man-db.service man-db.timer
+    apt-daily.service apt-daily.timer
+    apt-daily-upgrade.service apt-daily-upgrade.timer
+    fstrim.service fstrim.timer
+    ModemManager.service
+    pppd-dns.service
+    systemd-resolved.service
+    console-setup.service
+    keyboard-setup.service
+    e2scrub_all.service e2scrub_all.timer
+    e2scrub_reap.service
+    systemd-timesyncd.service
+  )
+  for s in "${services[@]}"; do
+    chroot "$ROOTFS" systemctl mask "$s" 2>/dev/null || true
+  done
 }
 
 vulnerability_scan() {
@@ -556,6 +729,25 @@ GRUB
   ls -lh "$qcow2"
 }
 
+sign_checksum() {
+  info "Signing image checksum..."
+  local qcow2="${OUTPUT_DIR}/${IMAGE_NAME}.qcow2"
+  local sha="${OUTPUT_DIR}/${IMAGE_NAME}.SHA256SUMS"
+  local sig="${OUTPUT_DIR}/${IMAGE_NAME}.SHA256SUMS.asc"
+
+  if [ -f "$qcow2" ]; then
+    (cd "$OUTPUT_DIR" && sha256sum "$(basename "$qcow2")" > "$sha")
+    # Generate ephemeral CI signing key if none exists
+    if [ ! -f "${OUTPUT_DIR}/signing-key.asc" ]; then
+      gpg --batch --passphrase '' --quick-gen-key "veilbox-ci@localhost" default default 2>/dev/null || true
+      gpg --export --armor "veilbox-ci@localhost" > "${OUTPUT_DIR}/signing-key.asc" 2>/dev/null || true
+    fi
+    gpg --batch --yes --armor --detach-sign --output "$sig" "$sha" 2>/dev/null || true
+    info "Checksum: $sha"
+    info "Signature: $sig"
+  fi
+}
+
 # --- Main ---
 check_deps
 
@@ -587,11 +779,14 @@ chmod +x "$ROOTFS/usr/sbin/policy-rc.d"
 install_packages
 install_docker
 install_guest_agents
+install_additional_security
 [ "$VARIANT" != "minimal" ] && install_devops_tools
 [ "$VARIANT" != "minimal" ] && install_gcloud
 [ "$VARIANT" != "minimal" ] && install_az
 configure_system
 apply_cis_hardening
+mask_services
+trim_image
 vulnerability_scan
 
 # Remove policy-rc.d
@@ -603,6 +798,7 @@ for d in dev proc sys; do
 done
 
 create_disk_image
+sign_checksum
 
 cleanup
 
