@@ -50,7 +50,6 @@ install_packages() {
     auditd haveged \
     parted \
     tmux htop iotop iftop jq \
-    lvm2 \
     python3 python3-pip python3-venv \
     $grub_pkgs efibootmgr \
     gnupg lsb-release unzip \
@@ -62,7 +61,15 @@ install_packages() {
     chrony tuned \
     wireguard-tools \
     pipx \
-    rsyslog
+    rsyslog \
+    network-manager netplan.io \
+    vim nano \
+    build-essential gcc make \
+    linux-perf bpftrace sysdig \
+    sysstat \
+    systemd-oomd \
+    rasdaemon edac-utils \
+    watchdog
   # Remove conflicting AppArmor (SELinux replaces it)
   chroot "$ROOTFS" apt-get remove -y -qq apparmor apparmor-profiles apparmor-utils 2>/dev/null || true
   chroot "$ROOTFS" apt-get autoremove -y -qq 2>/dev/null || true
@@ -312,9 +319,22 @@ growpart:
   devices: ['/']
   ignore_growroot_disabled: false
 resize_rootfs: true
+network:
+  renderer: NetworkManager
 CLOUD
 
-  # Disable cloud-init networking config (use DHCP)
+  # netplan: DHCP on all interfaces
+  cat > "$ROOTFS/etc/netplan/01-netcfg.yaml" <<'NETPLAN'
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    eth0:
+      dhcp4: true
+      dhcp6: true
+NETPLAN
+
+  # Disable cloud-init networking config (use NetworkManager)
   cat > "$ROOTFS/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg" <<'NET'
 network:
   config: disabled
@@ -365,6 +385,21 @@ passwd -l root 2>/dev/null || true
 # Run AIDE check daily
 systemctl enable aidecheck.service 2>/dev/null || true
 systemctl enable aidecheck.timer 2>/dev/null || true
+# Enable ZRAM swap (compress memory)
+modprobe zram 2>/dev/null || true
+echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+echo 256M > /sys/block/zram0/disksize 2>/dev/null || true
+mkswap /dev/zram0 2>/dev/null || true
+swapon /dev/zram0 2>/dev/null || true
+# Enable watchdog (softdog)
+modprobe softdog 2>/dev/null || true
+systemctl enable watchdog --now 2>/dev/null || true
+# Enable EDAC/RAS monitoring
+systemctl enable rasdaemon --now 2>/dev/null || true
+# Enable sysstat data collection
+systemctl enable sysstat --now 2>/dev/null || true
+systemctl enable sysstat-collect.timer 2>/dev/null || true
+systemctl enable sysstat-summary.timer 2>/dev/null || true
 # Expand partition if needed (growpart handled by cloud-init)
 true
 FB
@@ -378,6 +413,12 @@ FB
   chroot "$ROOTFS" systemctl enable auditd.service 2>/dev/null || true
   chroot "$ROOTFS" systemctl enable chrony.service 2>/dev/null || true
   chroot "$ROOTFS" systemctl enable tuned.service 2>/dev/null || true
+  chroot "$ROOTFS" systemctl enable NetworkManager.service 2>/dev/null || true
+  chroot "$ROOTFS" systemctl enable rasdaemon.service 2>/dev/null || true
+  chroot "$ROOTFS" systemctl enable sysstat.service 2>/dev/null || true
+  chroot "$ROOTFS" systemctl enable sysstat-collect.timer 2>/dev/null || true
+  chroot "$ROOTFS" systemctl enable sysstat-summary.timer 2>/dev/null || true
+  chroot "$ROOTFS" systemctl enable fstrim.timer 2>/dev/null || true
 
   # Docker group
   chroot "$ROOTFS" groupadd -f docker 2>/dev/null || true
@@ -453,6 +494,66 @@ MaxRetentionSec=7day
 MaxFileSec=1day
 Compress=yes
 JOURNAL
+
+  # ZRAM swap via systemd-zram-generator
+  mkdir -p "$ROOTFS/etc/systemd"
+  cat > "$ROOTFS/etc/systemd/zram-generator.conf" <<'ZRAM'
+[zram0]
+zram-size = min(ram / 2, 2048)
+compression-algorithm = lz4
+ZRAM
+
+  # Watchdog (softdog)
+  mkdir -p "$ROOTFS/etc/default"
+  cat > "$ROOTFS/etc/default/watchdog" <<'WDOG'
+# Softdog watchdog
+watchdog_module="softdog"
+watchdog_device="/dev/watchdog"
+watchdog_timeout="30"
+watchdog_reboot="yes"
+WDOG
+
+  # Initramfs: switch to zstd compression
+  cat > "$ROOTFS/etc/initramfs-tools/conf.d/zstd-compression" <<'ZSTD'
+COMPRESS=zstd
+ZSTD
+  # Rebuild initramfs with zstd
+  chroot "$ROOTFS" update-initramfs -u -k all 2>/dev/null || true
+
+  # Memory tuning
+  mkdir -p "$ROOTFS/etc/sysctl.d"
+  cat > "$ROOTFS/etc/sysctl.d/98-memory-tuning.conf" <<'MEM'
+# Reduce swapping tendency
+vm.swappiness = 10
+vm.vfs_cache_pressure = 50
+# Transparent hugepages: madvise for consistent latency
+# (only use for explicitly requested allocations)
+# Applied via: echo madvise > /sys/kernel/mm/transparent_hugepage/enabled
+# Instead, use kernel parameter: transparent_hugepage=madvise
+# CPU: prefer performance governor
+# Applied via tuned profile virtual-guest
+MEM
+
+  # Extra kernel boot params for tuned memory behavior
+  mkdir -p "$ROOTFS/etc/default/grub.d"
+  cat > "$ROOTFS/etc/default/grub.d/veilbox-memory.cfg" <<'GRUBMEM'
+GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT transparent_hugepage=madvise"
+GRUBMEM
+  # Intel-specific: only apply for amd64
+  if [ "$ARCH" = "amd64" ]; then
+    cat >> "$ROOTFS/etc/default/grub.d/veilbox-memory.cfg" <<'GRUBINTEL'
+GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT processor.max_cstate=1 intel_idle.max_cstate=0"
+GRUBINTEL
+  fi
+
+  # systemd-oomd config
+  mkdir -p "$ROOTFS/etc/systemd/oomd.conf.d"
+  cat > "$ROOTFS/etc/systemd/oomd.conf.d/50-veilbox.conf" <<'OOMD'
+[OOM]
+SwapUsedLimitPercent=90
+DefaultMemoryPressureLimitPercent=50
+DefaultMemoryPressureDurationSec=30
+OOMD
 
   # Configure unattended-upgrades
   cat > "$ROOTFS/etc/apt/apt.conf.d/50unattended-upgrades" <<'UA'
@@ -570,6 +671,14 @@ EOF
     echo "wireguard=$(chroot "$ROOTFS" wg --version 2>/dev/null || echo unknown)"
     echo "pipx=$(chroot "$ROOTFS" pipx --version 2>/dev/null || echo unknown)"
     echo "rsyslog=$(chroot "$ROOTFS" rsyslogd -v 2>/dev/null | head -1 || echo unknown)"
+    echo "perf=$(chroot "$ROOTFS" perf --version 2>/dev/null || echo unknown)"
+    echo "bpftrace=$(chroot "$ROOTFS" bpftrace --version 2>/dev/null || echo unknown)"
+    echo "sysdig=$(chroot "$ROOTFS" sysdig --version 2>/dev/null | head -1 || echo unknown)"
+    echo "NetworkManager=$(chroot "$ROOTFS" nmcli --version 2>/dev/null || echo unknown)"
+    echo "netplan=$(chroot "$ROOTFS" netplan --version 2>/dev/null || echo unknown)"
+    echo "rasdaemon=$(chroot "$ROOTFS" rasdaemon --version 2>/dev/null | head -1 || echo unknown)"
+    echo "watchdog=$(chroot "$ROOTFS" wdctl --version 2>/dev/null || echo unknown)"
+    echo "sadc=$(chroot "$ROOTFS" sadc --version 2>/dev/null || echo unknown)"
   } > "$ROOTFS/etc/veilbox/sbom-tools.txt" 2>/dev/null || true
 
   # Clean up apt and logs (image trimming handled by trim_image later)
@@ -726,7 +835,6 @@ mask_services() {
     man-db.service man-db.timer
     apt-daily.service apt-daily.timer
     apt-daily-upgrade.service apt-daily-upgrade.timer
-    fstrim.service fstrim.timer
     ModemManager.service
     pppd-dns.service
     console-setup.service

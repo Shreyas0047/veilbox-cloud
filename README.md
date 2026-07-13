@@ -1,6 +1,6 @@
 # Veilbox Cloud
 
-Minimal cloud DevOps image — Debian Trixie with Docker, Kubernetes tooling, cloud CLIs, guest agents, and CIS-inspired hardening pre-installed. Built for headless cloud VMs (AWS, Azure, GCP, any x86/ARM64 provider).
+Minimal cloud DevOps image — Debian Trixie with Docker, Kubernetes tooling, cloud CLIs, guest agents, cloud networking, and full hardening pre-installed. Built for headless cloud VMs (AWS, Azure, GCP, any x86/ARM64 provider).
 
 ## Quick Start
 
@@ -49,33 +49,57 @@ ssh admin@localhost -p 2222
 
 | Variant | Image | Description |
 |---------|-------|-------------|
-| **full** | `veilbox-cloud-trixie-<arch>-full.qcow2.gz` | All tools, CLIs, agents, and hardening |
-| **minimal** | `veilbox-cloud-trixie-<arch>-minimal.qcow2.gz` | Base image without DevOps CLIs or cloud CLIs |
+| **full** | `veilbox-cloud-trixie-<arch>-full.qcow2.gz` | All tools, CLIs, agents, profiling, and hardening |
+| **minimal** | `veilbox-cloud-trixie-<arch>-minimal.qcow2.gz` | Base image without DevOps/cloud CLIs or visual tools |
 
 ## Included Tooling
 
-| Tool | Purpose |
-|------|---------|
-| Docker CE + containerd | Container runtime |
-| kubectl | Kubernetes CLI |
-| Helm | Kubernetes package manager |
-| k9s | Kubernetes TUI dashboard |
-| stern | Multi-pod log tailing |
-| kind | Local Kubernetes clusters |
-| kustomize | Kubernetes config management |
-| Terraform | Infrastructure provisioning |
-| AWS CLI v2 | Amazon Web Services |
-| Google Cloud CLI | Google Cloud Platform |
-| Azure CLI | Microsoft Azure |
-| GitHub CLI | GitHub operations |
-| yq | YAML/JSON processor |
-| dive | Docker layer inspector |
-| jq | JSON processor |
-| tmux, htop, iotop, iftop | System utilities |
-| cloud-init | First-boot provisioning |
-| fail2ban, rkhunter, chkrootkit | Intrusion detection |
-| AIDE | File integrity monitoring |
-| firewalld, SELinux, auditd | Security hardening |
+### Containers & Orchestration
+- Docker CE + containerd — container runtime
+- kubectl, Helm, k9s, stern, kind, kustomize — Kubernetes tooling
+- Pre-pulled images: alpine, busybox, nginx:alpine, python:alpine
+
+### Cloud CLIs
+- AWS CLI v2, Google Cloud CLI, Azure CLI, GitHub CLI
+
+### Infrastructure
+- Terraform, yq, dive, jq
+
+### Networking & Time
+- NetworkManager + netplan — DHCP everywhere
+- chrony — cloud-aware NTP (GCP, Azure, AWS metadata sources)
+- WireGuard — VPN tunnels
+- firewalld — default drop zone
+
+### Performance & Monitoring
+- tuned — virtual-guest profile
+- perf, bpftrace, sysdig — deep observability
+- sysstat (sar/sadc) — historical performance data
+- rasdaemon — EDAC/RAS memory error reporting
+- softdog watchdog — system hang detection
+- systemd-oomd — proactive OOM management
+
+### System & Utilities
+- Vim, nano, build-essential, gcc, make
+- tmux, htop, iotop, iftop
+- pipx — isolated Python CLI tool management
+- tmuxp / byobu — session persistence
+
+### Security
+- SELinux enforcing — Mandatory Access Control
+- firewalld — default drop, only SSH + DHCPv6
+- SSH hardened — Protocol 2, key-only, restricted ciphers/kex/MACs, rate limited
+- fail2ban — SSH brute-force protection
+- auditd — 15+ file/event monitoring rules
+- AIDE — file integrity DB pre-built
+- rkhunter + chkrootkit — rootkit detection
+- unattended-upgrades — auto-security patches
+- Kernel module denylist — floppy, firewire, bluetooth, sound, etc.
+- systemd-oomd — proactive OOM kill
+- ZRAM swap — compressed memory swap (lz4, up to half RAM)
+
+### Cloud Guest Agents
+- cloud-init, walinuxagent (Azure), amazon-ssm-agent (AWS), google-compute-engine (GCP)
 
 ## Build from Source
 
@@ -117,39 +141,32 @@ sudo QEMU_IMAGE=output/veilbox-cloud-trixie-amd64-full.qcow2 bash tests/smoke.sh
 - **Disk**: qcow2 format, BIOS+EFI boot (amd64), EFI-only (arm64)
 - **Partitioning**: GPT with FAT32 ESP + ext4 root
 - **Default user**: `admin` (created by cloud-init, SSH key only)
-- **First-boot**: firewalld (drop zone), SELinux enforcing (autorelabel), auditd, fail2ban, unattended-upgrades
+- **First-boot**: firewalld (drop zone), SELinux enforcing (autorelabel), auditd, fail2ban, chrony, tuned, ZRAM swap, watchdog, rasdaemon, sysstat, unattended-upgrades
 - **Build info**: `/etc/veilbox/build-info` contains version, date, and arch
 - **SBOM**: `/etc/veilbox/sbom-dpkg.txt` (all packages) and `sbom-tools.txt` (tool versions)
 - **Checksums**: Release artifacts include `.SHA256SUMS` and GPG signature (`.asc`)
 
-## Security
+## Hardening Summary
 
-### Hardening applied
+- SELinux enforcing (autorelabel on first boot)
+- firewalld default drop zone (SSH + DHCPv6 only)
+- SSH: key-only, restricted ciphers/kex/MACs, MaxAuthTries 3, MaxStartups 10:30:60
+- Kernel: ASLR, rp_filter, kptr_restrict, dmesg_restrict, yama ptrace, TCP syncookies, RFC 1337, martian logging, protected hard/symlinks, suid_dumpable=0
+- sysctl: vm.swappiness=10, vm.vfs_cache_pressure=50
+- Boot params: transparent_hugepage=madvise, processor.max_cstate=1 (x86 only)
+- auditd: rules for sudoers, identity files, sshd_config, logins, kernel modules, Docker
+- Kernel module denylist: floppy, parport, firewire, bluetooth, sound, PC speaker
+- Initramfs: zstd compression for faster boot
+- unattended-upgrades: auto-fix, auto-clean, auto-reboot at 03:00
+- umask 027: default for new files
+- fail2ban: SSH jail (bantime 3600, maxretry 3)
+- AIDE file integrity DB pre-built
+- rkhunter + chkrootkit installed and configured
+- Root locked, empty passwords denied
+- systemd journal: 500M max, 7-day retention
+- systemd-oomd: SwapUsedLimitPercent=90, MemoryPressureLimit=50%
 
-- **SELinux** enforcing mode (with autorelabel on first boot)
-- **firewalld** default drop zone, only SSH and DHCPv6 allowed
-- **SSH**: Protocol 2, key-only auth, restricted ciphers/kex/MACs, rate limited (MaxAuthTries 3, MaxStartups 10:30:60)
-- **sysctl**: ASLR, rp_filter, kptr_restrict, dmesg_restrict, yama ptrace, TCP syncookies, RFC 1337, martian logging, protected hard/symlinks, suid_dumpable=0
-- **auditd**: Rules monitoring sudoers, identity files, sshd_config, logins, kernel modules, Docker socket
-- **Kernel module denylist**: floppy, parport, firewire, bluetooth, sound, PC speaker blocked
-- **unattended-upgrades**: Auto-fix, auto-clean, auto-reboot at 03:00
-- **umask 027**: Default for new files
-- **fail2ban**: SSH jail (bantime 3600, maxretry 3)
-- **AIDE** file integrity DB built and configured
-- **rkhunter + chkrootkit** installed and configured
-- **Root locked**, empty passwords denied
-- **systemd journal**: 500M max, 7-day retention
-
-### Cloud guest agents
-
-| Agent | Purpose |
-|-------|---------|
-| cloud-init | First-boot provisioning (all clouds) |
-| walinuxagent | Azure Linux Agent |
-| amazon-ssm-agent | AWS Systems Manager |
-| google-compute-engine | GCP guest environment |
-
-### Vulnerability scanning
+## Vulnerability Scanning
 
 Trivy filesystem scan runs during every build. Results in `/etc/veilbox/vuln-report.json`.
 
