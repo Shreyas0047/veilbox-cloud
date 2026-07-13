@@ -328,16 +328,12 @@ vulnerability_scan() {
   local trivy_arch="${ARCH/amd64/64bit}"
   trivy_arch="${trivy_arch/arm64/ARM64}"
   local trivy_tmp=$(mktemp -d)
-  local trivy_url="https://github.com/aquasecurity/trivy/releases/download/v0.61.0/trivy_0.61.0_Linux-${trivy_arch}.tar.gz"
-  echo "  downloading trivy from: $trivy_url"
+  local trivy_url="https://github.com/aquasecurity/trivy/releases/download/v0.72.0/trivy_0.72.0_Linux-${trivy_arch}.tar.gz"
   if curl -fsSL --connect-timeout 15 --max-time 120 "$trivy_url" -o "$trivy_tmp/trivy.tar.gz" 2>/dev/null; then
-    local sz=$(stat -c%s "$trivy_tmp/trivy.tar.gz" 2>/dev/null || echo 0)
-    echo "  downloaded $sz bytes"
     tar xzf "$trivy_tmp/trivy.tar.gz" -C "$trivy_tmp" 2>/dev/null || true
     if [ -f "$trivy_tmp/trivy" ]; then
       chmod +x "$trivy_tmp/trivy"
       export TRIVY_TEMP_DIR="$trivy_tmp/db"
-      echo "  scanning rootfs with trivy..."
       "$trivy_tmp/trivy" filesystem \
         --severity HIGH,CRITICAL --no-progress --format json \
         "$ROOTFS" > "$report" 2>/dev/null || true
@@ -346,15 +342,8 @@ vulnerability_scan() {
         local h=$(grep -o '"Severity":"HIGH"' "$report" | wc -l)
         echo "  CRITICAL: $c, HIGH: $h"
         cp "$report" "$ROOTFS/etc/veilbox/vuln-report.json" 2>/dev/null || true
-      else
-        echo "  [WARN] scan produced empty report"
       fi
-    else
-      echo "  [WARN] trivy binary not found in tarball"
-      ls -la "$trivy_tmp/" 2>/dev/null | head -5
     fi
-  else
-    echo "  [WARN] trivy download failed"
   fi
   rm -rf "$trivy_tmp" 2>/dev/null || true
 }
