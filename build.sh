@@ -45,13 +45,13 @@ install_packages() {
     openssh-server cloud-init cloud-guest-utils \
     sudo ca-certificates curl wget git \
     ufw apparmor apparmor-profiles apparmor-utils \
-    unattended-upgrades apt-listchanges \
-    auditd haveged needrestart \
-    parted lvm2 \
+    unattended-upgrades \
+    auditd haveged \
+    parted \
     tmux htop iotop iftop jq \
+    lvm2 \
     python3 python3-pip python3-venv \
     $grub_pkgs efibootmgr \
-    cryptsetup cryptsetup-initramfs \
     gnupg lsb-release unzip
   chroot "$ROOTFS" apt-get clean -qq
 }
@@ -257,6 +257,25 @@ FB
   # Docker group
   chroot "$ROOTFS" groupadd -f docker 2>/dev/null || true
 
+  # Configure unattended-upgrades
+  cat > "$ROOTFS/etc/apt/apt.conf.d/50unattended-upgrades" <<'UA'
+Unattended-Upgrade::Allowed-Origins {
+  "${distro_id}:${distro_codename}-security";
+  "${distro_id}ESM:${distro_codename}";
+};
+Unattended-Upgrade::Auto-Fix "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "03:00";
+UA
+  cat > "$ROOTFS/etc/apt/apt.conf.d/20auto-upgrades" <<'AU'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
+APT::Periodic::Unattended-Upgrade "1";
+AU
+
   # Build info
   mkdir -p "$ROOTFS/etc/veilbox"
   cat > "$ROOTFS/etc/veilbox/build-info" <<EOF
@@ -266,10 +285,39 @@ ARCH=${ARCH}
 SUITE=${SUITE}
 EOF
 
+  # SBOM: list all packages with versions
+  dpkg -l --root="$ROOTFS" 2>/dev/null | tail -n +6 | awk '{print $2 "=" $3}' \
+    > "$ROOTFS/etc/veilbox/sbom-dpkg.txt" 2>/dev/null || true
+  # Record tool versions
+  {
+    echo "docker=$(chroot "$ROOTFS" docker --version 2>/dev/null | head -1 || echo unknown)"
+    echo "kubectl=$(chroot "$ROOTFS" kubectl version --client --short 2>/dev/null || echo unknown)"
+    echo "helm=$(chroot "$ROOTFS" helm version --short 2>/dev/null || echo unknown)"
+    echo "terraform=$(chroot "$ROOTFS" terraform version 2>/dev/null | head -1 || echo unknown)"
+    echo "kind=$(chroot "$ROOTFS" kind version 2>/dev/null || echo unknown)"
+    echo "gh=$(chroot "$ROOTFS" gh --version 2>/dev/null | head -1 || echo unknown)"
+    echo "aws=$(chroot "$ROOTFS" aws --version 2>/dev/null | head -1 || echo unknown)"
+  } > "$ROOTFS/etc/veilbox/sbom-tools.txt" 2>/dev/null || true
+
+  # Trim: remove man pages, docs, locales, clean aggressively
+  rm -rf "$ROOTFS/usr/share/doc/"* 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/man/"* 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/info/"* 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/lintian/"* 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/linda/"* 2>/dev/null || true
+  rm -rf "$ROOTFS/var/cache/man/"* 2>/dev/null || true
+  # Keep only en_US.UTF-8 locale
+  find "$ROOTFS/usr/share/locale" -mindepth 1 -maxdepth 1 ! -name "en*" ! -name "locale.alias" -exec rm -rf {} + 2>/dev/null || true
+  # Remove unnecessary firmware
+  rm -rf "$ROOTFS/usr/lib/firmware/"* 2>/dev/null || true
+
   # Clean up
   chroot "$ROOTFS" apt-get clean -qq 2>/dev/null || true
-  rm -rf "$ROOTFS/var/lib/apt/lists/*" 2>/dev/null || true
-  rm -rf "$ROOTFS/tmp/*" 2>/dev/null || true
+  chroot "$ROOTFS" apt-get autoclean -qq 2>/dev/null || true
+  chroot "$ROOTFS" apt-get autoremove -qq 2>/dev/null || true
+  rm -rf "$ROOTFS/var/lib/apt/lists/"* 2>/dev/null || true
+  rm -rf "$ROOTFS/var/log/"* 2>/dev/null || true
+  rm -rf "$ROOTFS/tmp/"* 2>/dev/null || true
   rm -f "$ROOTFS/etc/resolv.conf"
 }
 
