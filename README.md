@@ -57,7 +57,7 @@ ssh admin@localhost -p 2222
 ### Containers & Orchestration
 - Docker CE + containerd — container runtime
 - kubectl, Helm, k9s, stern, kind, kustomize — Kubernetes tooling
-- Pre-pulled images: alpine, busybox, nginx:alpine, python:alpine
+- Pre-pulled images: alpine, busybox, ubuntu:24.04, debian:stable-slim, nginx:alpine, python:alpine, node:lts-alpine, golang:alpine
 
 ### Cloud CLIs
 - AWS CLI v2, Google Cloud CLI, Azure CLI, GitHub CLI
@@ -144,6 +144,7 @@ sudo QEMU_IMAGE=output/veilbox-cloud-trixie-amd64-full.qcow2 bash tests/smoke.sh
 - **First-boot**: firewalld (drop zone), SELinux enforcing (autorelabel), auditd, fail2ban, chrony, tuned, ZRAM swap, watchdog, rasdaemon, sysstat, unattended-upgrades
 - **Build info**: `/etc/veilbox/build-info` contains version, date, and arch
 - **SBOM**: `/etc/veilbox/sbom-dpkg.txt` (all packages) and `sbom-tools.txt` (tool versions)
+- **Image trimming**: Kernel modules removed (sound, firewire, bluetooth, wireless, media, staging, hwmon, iio, leds, mtd, rtc, ufs, w1, usb, input, gpio); remaining modules compressed with xz; binaries/libraries stripped; Python bytecache removed; fonts/icons/themes/docs purged
 - **Checksums**: Release artifacts include `.SHA256SUMS` and GPG signature (`.asc`)
 
 ## Hardening Summary
@@ -156,7 +157,8 @@ sudo QEMU_IMAGE=output/veilbox-cloud-trixie-amd64-full.qcow2 bash tests/smoke.sh
 - Boot params: transparent_hugepage=madvise, processor.max_cstate=1 (x86 only)
 - auditd: rules for sudoers, identity files, sshd_config, logins, kernel modules, Docker
 - Kernel module denylist: floppy, parport, firewire, bluetooth, sound, PC speaker
-- Initramfs: zstd compression for faster boot
+- Boot optimizations: systemd timeout 10s, network-wait-online/remote-fs masked
+- Initramfs: zstd compression, modules compressed with xz
 - unattended-upgrades: auto-fix, auto-clean, auto-reboot at 03:00
 - umask 027: default for new files
 - fail2ban: SSH jail (bantime 3600, maxretry 3)

@@ -269,8 +269,12 @@ pull_container_images() {
   local images=(
     "docker.io/library/alpine:latest"
     "docker.io/library/busybox:latest"
+    "docker.io/library/ubuntu:24.04"
+    "docker.io/library/debian:stable-slim"
     "docker.io/library/nginx:alpine"
     "docker.io/library/python:alpine"
+    "docker.io/library/node:lts-alpine"
+    "docker.io/library/golang:alpine"
   )
   for img in "${images[@]}"; do
     chroot "$ROOTFS" docker pull "$img" 2>/dev/null || true
@@ -321,6 +325,14 @@ growpart:
 resize_rootfs: true
 network:
   renderer: NetworkManager
+ntp:
+  enabled: true
+  ntp_client: chrony
+  servers:
+    - 0.debian.pool.ntp.org
+    - 1.debian.pool.ntp.org
+    - 2.debian.pool.ntp.org
+    - 3.debian.pool.ntp.org
 CLOUD
 
   # netplan: DHCP on all interfaces
@@ -483,6 +495,15 @@ BLACK
     grep -q "umask=027" "$ROOTFS/etc/pam.d/$f" 2>/dev/null || \
       echo "session optional pam_umask.so umask=027" >> "$ROOTFS/etc/pam.d/$f" 2>/dev/null || true
   done
+
+  # systemd timeout and process limits
+  mkdir -p "$ROOTFS/etc/systemd/system.conf.d"
+  cat > "$ROOTFS/etc/systemd/system.conf.d/50-veilbox.conf" <<'SYSTEMD'
+[Manager]
+DefaultTimeoutStopSec=10s
+DefaultTimeoutAbortSec=5s
+DefaultDeviceTimeoutSec=30s
+SYSTEMD
 
   # systemd journal limits
   mkdir -p "$ROOTFS/etc/systemd/journald.conf.d"
@@ -803,17 +824,50 @@ AUDIT
 trim_image() {
   info "Trimming image size..."
 
-  # Remove unnecessary kernel modules
-  for mod_dir in sound firewire bluetooth wireless media staging; do
+  # Remove unnecessary kernel modules (hardware not present on cloud VMs)
+  local mod_dirs=(
+    sound firewire bluetooth wireless media staging
+    hwmon iio leds mtd rtc ufs w1 usb input gpio
+  )
+  for mod_dir in "${mod_dirs[@]}"; do
     find "$ROOTFS/lib/modules" -path "*/${mod_dir}/*" -delete 2>/dev/null || true
   done
 
-  # Strip ELF binaries (safe: --strip-unneeded keeps debug info needed for backtraces)
-  find "$ROOTFS/usr" -type f -executable -exec strip --strip-unneeded {} \; 2>/dev/null || true
+  # Rebuild depmod after module removal
+  chroot "$ROOTFS" depmod -a 2>/dev/null || true
+
+  # Strip ELF binaries and libraries
+  find "$ROOTFS/bin" "$ROOTFS/sbin" "$ROOTFS/usr/bin" "$ROOTFS/usr/sbin" \
+    -type f -executable -exec strip --strip-all {} \; 2>/dev/null || true
+  find "$ROOTFS/usr/lib" -name "*.so.*" -type f -exec strip --strip-unneeded {} \; 2>/dev/null || true
+  find "$ROOTFS/lib" -name "*.so.*" -type f -exec strip --strip-unneeded {} \; 2>/dev/null || true
+
+  # Remove Python bytecache and unused Python components
+  find "$ROOTFS/usr/lib/python3*" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+  find "$ROOTFS/usr/lib/python3*" -name "*.pyc" -delete 2>/dev/null || true
+  find "$ROOTFS/usr/lib/python3*" -name "*.pyo" -delete 2>/dev/null || true
+  find "$ROOTFS/usr/lib/python3*" -name "tests" -type d -exec rm -rf {} + 2>/dev/null || true
+  find "$ROOTFS/usr/lib/python3*" -name "test" -type d -exec rm -rf {} + 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/lib/python3/dist-packages/"*.dist-info 2>/dev/null || true
 
   # Remove unnecessary translation files
   find "$ROOTFS/usr/share/locale" -mindepth 1 -maxdepth 1 ! -name "en*" ! -name "locale.alias" -exec rm -rf {} + 2>/dev/null || true
   find "$ROOTFS/usr/share/i18n/locales" ! -name "en_US*" ! -name "C" ! -name "POSIX" -delete 2>/dev/null || true
+
+  # Remove large unnecessary directories
+  rm -rf "$ROOTFS/usr/share/fonts" 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/icons" 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/themes" 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/backgrounds" 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/sounds" 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/desktop-directories" 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/applications" 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/app-info" 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/man" 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/info" 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/doc" 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/lintian" 2>/dev/null || true
+  rm -rf "$ROOTFS/usr/share/linda" 2>/dev/null || true
 
   # Remove cached data
   chroot "$ROOTFS" apt-get clean -qq 2>/dev/null || true
@@ -825,7 +879,7 @@ trim_image() {
   rm -rf "$ROOTFS/tmp/"* 2>/dev/null || true
   rm -rf "$ROOTFS/var/tmp/"* 2>/dev/null || true
 
-  # Rebuild depmod after module removal
+  # Final depmod
   chroot "$ROOTFS" depmod -a 2>/dev/null || true
 }
 
@@ -841,6 +895,9 @@ mask_services() {
     keyboard-setup.service
     e2scrub_all.service e2scrub_all.timer
     e2scrub_reap.service
+    nfs-client.target
+    remote-fs.target
+    systemd-networkd-wait-online.service
   )
   for s in "${services[@]}"; do
     chroot "$ROOTFS" systemctl mask "$s" 2>/dev/null || true
