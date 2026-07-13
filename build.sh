@@ -328,23 +328,21 @@ vulnerability_scan() {
   local trivy_arch="${ARCH/amd64/64bit}"
   trivy_arch="${trivy_arch/arm64/ARM64}"
   local trivy_tmp=$(mktemp -d)
-  if curl -fsSL --connect-timeout 15 --max-time 60 \
-    "https://github.com/aquasecurity/trivy/releases/download/v0.61.0/trivy_0.61.0_Linux-${trivy_arch}.tar.gz" \
-    -o "$trivy_tmp/trivy.tar.gz" 2>/dev/null; then
+  local trivy_url="https://github.com/aquasecurity/trivy/releases/download/v0.61.0/trivy_0.61.0_Linux-${trivy_arch}.tar.gz"
+  if curl -fsSL --connect-timeout 15 --max-time 120 "$trivy_url" -o "$trivy_tmp/trivy.tar.gz" 2>/dev/null; then
     tar xzf "$trivy_tmp/trivy.tar.gz" -C "$trivy_tmp" 2>/dev/null || true
-    local trivy_bin=$(find "$trivy_tmp" -name "trivy" -type f 2>/dev/null | head -1)
-    if [ -n "$trivy_bin" ]; then
-      chmod +x "$trivy_bin"
-      echo "  trivy binary ready, scanning (this may take a while)..."
-      TRIVY_TEMP_DIR="$trivy_tmp/db" "$trivy_bin" filesystem \
-        --severity HIGH,CRITICAL \
-        --no-progress \
-        --format json \
+    if [ -f "$trivy_tmp/trivy" ]; then
+      chmod +x "$trivy_tmp/trivy"
+      export TRIVY_TEMP_DIR="$trivy_tmp/db"
+      "$trivy_tmp/trivy" filesystem \
+        --severity HIGH,CRITICAL --no-progress --format json \
         "$ROOTFS" > "$report" 2>/dev/null || true
-      local critical=$(grep -o '"Severity":"CRITICAL"' "$report" 2>/dev/null | wc -l)
-      local high=$(grep -o '"Severity":"HIGH"' "$report" 2>/dev/null | wc -l)
-      echo "  CRITICAL: $critical, HIGH: $high"
-      cp "$report" "$ROOTFS/etc/veilbox/vuln-report.json" 2>/dev/null || true
+      if [ -s "$report" ]; then
+        local c=$(grep -o '"Severity":"CRITICAL"' "$report" | wc -l)
+        local h=$(grep -o '"Severity":"HIGH"' "$report" | wc -l)
+        echo "  CRITICAL: $c, HIGH: $h"
+        cp "$report" "$ROOTFS/etc/veilbox/vuln-report.json" 2>/dev/null || true
+      fi
     fi
   fi
   rm -rf "$trivy_tmp" 2>/dev/null || true
