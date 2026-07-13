@@ -58,7 +58,11 @@ install_packages() {
     kdump-tools \
     aide \
     fail2ban \
-    rkhunter chkrootkit
+    rkhunter chkrootkit \
+    chrony tuned \
+    wireguard-tools \
+    pipx \
+    rsyslog
   # Remove conflicting AppArmor (SELinux replaces it)
   chroot "$ROOTFS" apt-get remove -y -qq apparmor apparmor-profiles apparmor-utils 2>/dev/null || true
   chroot "$ROOTFS" apt-get autoremove -y -qq 2>/dev/null || true
@@ -252,6 +256,20 @@ install_devops_tools() {
   rm -rf "$aws_tmp" 2>/dev/null || true
 }
 
+pull_container_images() {
+  [ "$VARIANT" = "minimal" ] && return
+  info "Pre-pulling common container images..."
+  local images=(
+    "docker.io/library/alpine:latest"
+    "docker.io/library/busybox:latest"
+    "docker.io/library/nginx:alpine"
+    "docker.io/library/python:alpine"
+  )
+  for img in "${images[@]}"; do
+    chroot "$ROOTFS" docker pull "$img" 2>/dev/null || true
+  done
+}
+
 configure_system() {
   info "Configuring system..."
 
@@ -333,6 +351,11 @@ firewall-cmd --reload 2>/dev/null || true
 systemctl enable auditd --now 2>/dev/null || true
 # Enable haveged
 systemctl enable haveged --now 2>/dev/null || true
+# Enable chrony time sync
+systemctl enable chrony --now 2>/dev/null || true
+# Enable tuned performance profile
+systemctl enable tuned --now 2>/dev/null || true
+tuned-adm profile virtual-guest 2>/dev/null || true
 # Enable auto-upgrades
 systemctl enable unattended-upgrades --now 2>/dev/null || true
 # Enable fail2ban
@@ -353,9 +376,39 @@ FB
   chroot "$ROOTFS" systemctl enable docker.service 2>/dev/null || true
   chroot "$ROOTFS" systemctl enable haveged.service 2>/dev/null || true
   chroot "$ROOTFS" systemctl enable auditd.service 2>/dev/null || true
+  chroot "$ROOTFS" systemctl enable chrony.service 2>/dev/null || true
+  chroot "$ROOTFS" systemctl enable tuned.service 2>/dev/null || true
 
   # Docker group
   chroot "$ROOTFS" groupadd -f docker 2>/dev/null || true
+
+  # Docker daemon tuning
+  mkdir -p "$ROOTFS/etc/docker"
+  cat > "$ROOTFS/etc/docker/daemon.json" <<'DOCKER'
+{
+  "storage-driver": "overlay2",
+  "log-driver": "journald",
+  "log-opts": {
+    "tag": "{{.Name}}/{{.ID}}"
+  },
+  "selinux-enabled": true,
+  "live-restore": true,
+  "userland-proxy": false,
+  "iptables": true,
+  "default-ulimits": {
+    "nofile": {
+      "Name": "nofile",
+      "Hard": 1048576,
+      "Soft": 1048576
+    },
+    "nproc": {
+      "Name": "nproc",
+      "Hard": 1048576,
+      "Soft": 1048576
+    }
+  }
+}
+DOCKER
 
   # Kernel module denylist (unnecessary on cloud VMs)
   cat > "$ROOTFS/etc/modprobe.d/veilbox-blacklist.conf" <<'BLACK'
@@ -420,6 +473,69 @@ APT::Periodic::AutocleanInterval "7";
 APT::Periodic::Unattended-Upgrade "1";
 AU
 
+  # chrony: cloud-aware NTP config
+  cat > "$ROOTFS/etc/chrony/chrony.conf" <<'CHRONY'
+# Cloud metadata NTP sources
+pool metadata.google.internal iburst prefer  # GCP
+pool time.azure.com iburst prefer            # Azure
+pool 169.254.169.123 iburst prefer           # AWS
+pool 0.debian.pool.ntp.org iburst
+pool 1.debian.pool.ntp.org iburst
+pool 2.debian.pool.ntp.org iburst
+pool 3.debian.pool.ntp.org iburst
+
+# Drift file
+driftfile /var/lib/chrony/chrony.drift
+makestep 1.0 3
+rtcsync
+logdir /var/log/chrony
+CHRONY
+
+  # kdump: reserve crashkernel memory
+  mkdir -p "$ROOTFS/etc/default/grub.d"
+  cat > "$ROOTFS/etc/default/grub.d/veilbox-kdump.cfg" <<'KDUMP'
+GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT crashkernel=384M"
+GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT mitigations=auto panic=10"
+KDUMP
+
+  # Crypto policies baseline
+  mkdir -p "$ROOTFS/etc/crypto-policies/policies/modules"
+  cat > "$ROOTFS/etc/crypto-policies/config" <<'CRYPTO'
+# Veilbox crypto baseline (similar to RHEL FUTURE policy)
+# SSH and TLS are hardened separately in their own configs.
+# This file documents the system-wide crypto baseline.
+CIPHERS: CHACHA20-POLY1305:AES-256-GCM:AES-128-GCM
+TLS-CIPHERS: ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256
+SSH-CIPHERS: chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+SSH-KEX: curve25519-sha256,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512
+SSH-MACS: hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+MIN-TLS-VERSION: 1.2
+SHA256-CRYPT: yes
+SHA512-CRYPT: yes
+CRYPTO
+
+  # rsyslog: remote syslog forwarding template
+  mkdir -p "$ROOTFS/etc/rsyslog.d"
+  cat > "$ROOTFS/etc/rsyslog.d/50-remote-syslog.conf" <<'RSYSLOG'
+# Remote syslog forwarding template
+# Uncomment and configure for your log aggregator:
+# $ActionSendStreamDriver gtls
+# $ActionSendStreamDriverMode 1
+# $ActionSendStreamDriverAuthMode x509/name
+# $DefaultNetstreamDriverCAFile /etc/ssl/certs/ca-certificates.crt
+# *.* @@logs.example.com:6514
+
+# Local fallback: log everything to standard files
+auth,authpriv.*			/var/log/auth.log
+*.*;auth,authpriv.none		-/var/log/syslog
+cron.*				/var/log/cron.log
+daemon.*			-/var/log/daemon.log
+kern.*				-/var/log/kern.log
+lpr.*				-/var/log/lpr.log
+mail.*				-/var/log/mail.log
+user.*				-/var/log/user.log
+RSYSLOG
+
   # Build info
   mkdir -p "$ROOTFS/etc/veilbox"
   cat > "$ROOTFS/etc/veilbox/build-info" <<EOF
@@ -449,6 +565,11 @@ EOF
     echo "chkrootkit=$(chroot "$ROOTFS" chkrootkit --version 2>/dev/null || echo unknown)"
     echo "selinux=$(chroot "$ROOTFS" sestatus 2>/dev/null | head -1 || echo unknown)"
     echo "firewalld=$(chroot "$ROOTFS" firewall-cmd --version 2>/dev/null || echo unknown)"
+    echo "chrony=$(chroot "$ROOTFS" chronyd --version 2>/dev/null | head -1 || echo unknown)"
+    echo "tuned=$(chroot "$ROOTFS" tuned-adm active 2>/dev/null || echo unknown)"
+    echo "wireguard=$(chroot "$ROOTFS" wg --version 2>/dev/null || echo unknown)"
+    echo "pipx=$(chroot "$ROOTFS" pipx --version 2>/dev/null || echo unknown)"
+    echo "rsyslog=$(chroot "$ROOTFS" rsyslogd -v 2>/dev/null | head -1 || echo unknown)"
   } > "$ROOTFS/etc/veilbox/sbom-tools.txt" 2>/dev/null || true
 
   # Clean up apt and logs (image trimming handled by trim_image later)
@@ -608,12 +729,10 @@ mask_services() {
     fstrim.service fstrim.timer
     ModemManager.service
     pppd-dns.service
-    systemd-resolved.service
     console-setup.service
     keyboard-setup.service
     e2scrub_all.service e2scrub_all.timer
     e2scrub_reap.service
-    systemd-timesyncd.service
   )
   for s in "${services[@]}"; do
     chroot "$ROOTFS" systemctl mask "$s" 2>/dev/null || true
@@ -778,6 +897,7 @@ chmod +x "$ROOTFS/usr/sbin/policy-rc.d"
 
 install_packages
 install_docker
+pull_container_images
 install_guest_agents
 install_additional_security
 [ "$VARIANT" != "minimal" ] && install_devops_tools
